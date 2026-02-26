@@ -298,7 +298,7 @@ proc render*(state: EditorState) =
               let gapEnd = min(token.col, endCol)
               if col < gapEnd: stdout.write(line[col..<gapEnd])
               col = gapEnd
-            let tStart = max(token.col, startCol)
+            let tStart = max(token.col, max(startCol, col))
             let tEndClamped = min(tEnd, endCol)
             if tStart < tEndClamped and tStart < line.len:
               if token.color != 0: setFg(token.color)
