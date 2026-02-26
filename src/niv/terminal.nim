@@ -30,8 +30,8 @@ proc enableRawMode*() =
   discard tcSetAttr(STDIN_FILENO, TCSAFLUSH, addr raw)
   rawModeEnabled = true
 
-  # Alternate screen buffer + hide cursor
-  stdout.write("\e[?1049h")
+  # Alternate screen buffer + Tokyo Night Storm theme + clear
+  stdout.write("\e[?1049h\e[38;2;192;202;245m\e[48;2;36;40;59m\e[2J\e[H")
   stdout.flushFile()
 
 proc disableRawMode*() =
@@ -167,3 +167,26 @@ proc resetAttributes*() =
 
 proc flushOut*() =
   stdout.flushFile()
+
+# 24-bit true color support (Tokyo Night Storm)
+proc setColorFg*(color: int) =
+  ## Set foreground from 0xRRGGBB
+  let r = (color shr 16) and 0xFF
+  let g = (color shr 8) and 0xFF
+  let b = color and 0xFF
+  stdout.write("\e[38;2;" & $r & ";" & $g & ";" & $b & "m")
+
+proc setColorBg*(color: int) =
+  ## Set background from 0xRRGGBB
+  let r = (color shr 16) and 0xFF
+  let g = (color shr 8) and 0xFF
+  let b = color and 0xFF
+  stdout.write("\e[48;2;" & $r & ";" & $g & ";" & $b & "m")
+
+proc setThemeColors*() =
+  ## Reset and apply Tokyo Night Storm: #c0caf5 on #24283b
+  stdout.write("\e[0m\e[38;2;192;202;245m\e[48;2;36;40;59m")
+
+proc setThemeFg*() =
+  ## Restore default theme foreground (#c0caf5)
+  stdout.write("\e[38;2;192;202;245m")

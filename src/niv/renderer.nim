@@ -12,6 +12,16 @@ import lsp_types
 import highlight
 import ts_manager
 
+# Tokyo Night Storm palette
+const
+  colBg       = 0x24283b
+  colFg       = 0xc0caf5
+  colGutter   = 0x3b4261
+  colDarkBg   = 0x1f2335
+  colCursorLn = 0x292e42
+  colError    = 0xdb4b4b
+  colWarning  = 0xe0af68
+
 proc renderSidebar(state: EditorState, height: int) =
   let sb = state.sidebar
   let w = sb.width
@@ -19,13 +29,14 @@ proc renderSidebar(state: EditorState, height: int) =
 
   # Header
   moveCursor(1, 1)
-  setInverseVideo()
+  setColorBg(colDarkBg)
+  setColorFg(colFg)
   let header = " FILE EXPLORER"
   let truncHeader = if header.len > w: header[0..<w] else: header
   stdout.write(truncHeader)
   if truncHeader.len < w:
     stdout.write(spaces(w - truncHeader.len))
-  resetAttributes()
+  setThemeColors()
 
   # Tree entries
   for row in 1..<visibleRows:
@@ -43,7 +54,7 @@ proc renderSidebar(state: EditorState, height: int) =
       let label = indent & icon & node.name & suffix
 
       if idx == sb.cursorIndex and sb.focused:
-        setInverseVideo()
+        setColorBg(colCursorLn)
 
       let truncated = if label.len > w: label[0..<w] else: label
       stdout.write(truncated)
@@ -51,36 +62,35 @@ proc renderSidebar(state: EditorState, height: int) =
         stdout.write(spaces(w - truncated.len))
 
       if idx == sb.cursorIndex and sb.focused:
-        resetAttributes()
+        setThemeColors()
     else:
       stdout.write(spaces(w))
 
   # Vertical separator
   for row in 1..visibleRows:
     moveCursor(row, w + 1)
-    setDim()
+    setColorFg(colGutter)
     stdout.write("\xe2\x94\x82")  # │ (U+2502)
-    resetAttributes()
+    setThemeFg()
 
 proc renderModalRow(startCol, innerWidth: int, line: string) =
   ## Render a single content row inside the modal: │ content │
-  setInverseVideo()
+  setColorFg(colGutter)
   stdout.write("\xe2\x94\x82")  # │
-  resetAttributes()
+  setThemeFg()
   let truncated = if line.len > innerWidth: line[0..<innerWidth] else: line
   stdout.write(truncated)
   if truncated.len < innerWidth:
     stdout.write(spaces(innerWidth - truncated.len))
-  setInverseVideo()
+  setColorFg(colGutter)
   stdout.write("\xe2\x94\x82")  # │
-  resetAttributes()
+  setThemeFg()
 
 proc renderLspManagerModal(totalWidth, height: int) =
   let mgr = lspMgr
   if not mgr.visible:
     return
 
-  # Modal dimensions — wide enough for nimble output
   let modalWidth = min(totalWidth - 4, max(60, totalWidth * 2 div 3))
   let hasStatus = mgr.statusMessage.len > 0
   let contentRows = mgr.servers.len + 3 + (if hasStatus: 1 else: 0)
@@ -92,27 +102,27 @@ proc renderLspManagerModal(totalWidth, height: int) =
   for row in 0..<modalHeight:
     moveCursor(startRow + row, startCol)
     if row == 0:
-      # Top border with title
       let title = " LSP Manager "
       let borderLen = modalWidth - 2 - title.len
       let leftBorder = max(0, borderLen div 2)
       let rightBorder = max(0, borderLen - leftBorder)
-      setInverseVideo()
+      setColorFg(colGutter)
       stdout.write("\xe2\x94\x8c")  # ┌
       stdout.write("\xe2\x94\x80".repeat(leftBorder))  # ─
+      setThemeFg()
       stdout.write(title)
+      setColorFg(colGutter)
       stdout.write("\xe2\x94\x80".repeat(rightBorder))  # ─
       stdout.write("\xe2\x94\x90")  # ┐
-      resetAttributes()
+      setThemeFg()
     elif row == modalHeight - 1:
-      # Bottom border
-      setInverseVideo()
+      setColorFg(colGutter)
       stdout.write("\xe2\x94\x94")  # └
       stdout.write("\xe2\x94\x80".repeat(modalWidth - 2))  # ─
       stdout.write("\xe2\x94\x98")  # ┘
-      resetAttributes()
+      setThemeFg()
     else:
-      let contentRow = row - 1  # 0-indexed
+      let contentRow = row - 1
 
       if contentRow == 0:
         renderModalRow(startCol, innerWidth, "")
@@ -125,14 +135,17 @@ proc renderLspManagerModal(totalWidth, height: int) =
         let line = " " & icon & srv.name & langs & status
 
         if idx == mgr.cursorIndex:
-          setInverseVideo()
+          setColorBg(colCursorLn)
+          setColorFg(colGutter)
           stdout.write("\xe2\x94\x82")  # │
+          setThemeFg()
           let truncated = if line.len > innerWidth: line[0..<innerWidth] else: line
           stdout.write(truncated)
           if truncated.len < innerWidth:
             stdout.write(spaces(innerWidth - truncated.len))
+          setColorFg(colGutter)
           stdout.write("\xe2\x94\x82")  # │
-          resetAttributes()
+          setThemeColors()
         else:
           renderModalRow(startCol, innerWidth, line)
       elif contentRow == mgr.servers.len + 1:
@@ -163,19 +176,21 @@ proc renderTsManagerModal(totalWidth, height: int) =
       let borderLen = modalWidth - 2 - title.len
       let leftBorder = max(0, borderLen div 2)
       let rightBorder = max(0, borderLen - leftBorder)
-      setInverseVideo()
+      setColorFg(colGutter)
       stdout.write("\xe2\x94\x8c")  # ┌
       stdout.write("\xe2\x94\x80".repeat(leftBorder))  # ─
+      setThemeFg()
       stdout.write(title)
+      setColorFg(colGutter)
       stdout.write("\xe2\x94\x80".repeat(rightBorder))  # ─
       stdout.write("\xe2\x94\x90")  # ┐
-      resetAttributes()
+      setThemeFg()
     elif row == modalHeight - 1:
-      setInverseVideo()
+      setColorFg(colGutter)
       stdout.write("\xe2\x94\x94")  # └
       stdout.write("\xe2\x94\x80".repeat(modalWidth - 2))  # ─
       stdout.write("\xe2\x94\x98")  # ┘
-      resetAttributes()
+      setThemeFg()
     else:
       let contentRow = row - 1
 
@@ -190,14 +205,17 @@ proc renderTsManagerModal(totalWidth, height: int) =
         let line = " " & icon & g.name & exts & status
 
         if idx == mgr.cursorIndex:
-          setInverseVideo()
+          setColorBg(colCursorLn)
+          setColorFg(colGutter)
           stdout.write("\xe2\x94\x82")  # │
+          setThemeFg()
           let truncated = if line.len > innerWidth: line[0..<innerWidth] else: line
           stdout.write(truncated)
           if truncated.len < innerWidth:
             stdout.write(spaces(innerWidth - truncated.len))
+          setColorFg(colGutter)
           stdout.write("\xe2\x94\x82")  # │
-          resetAttributes()
+          setThemeColors()
         else:
           renderModalRow(startCol, innerWidth, line)
       elif contentRow == mgr.grammars.len + 1:
@@ -223,12 +241,14 @@ proc render*(state: EditorState) =
   let useTsHighlight = not useLspHighlight and tsLines.len > 0
 
   hideCursor()
+  setThemeColors()
 
   # Draw sidebar
   if sidebarVisible:
     var sb = state.sidebar
     adjustSidebarScroll(sb, height - 3)
     renderSidebar(state, height)
+    setThemeColors()
 
   # Draw editor buffer
   for row in 0..<height - 2:
@@ -252,13 +272,13 @@ proc render*(state: EditorState) =
             diagSev = 2
 
       if diagSev == 1:
-        setFg(31)  # Red
+        setColorFg(colError)
       elif diagSev == 2:
-        setFg(33)  # Yellow
+        setColorFg(colWarning)
       else:
-        setDim()
+        setColorFg(colGutter)
       stdout.write(spaces(padding) & numStr & " ")
-      resetAttributes()
+      setThemeFg()
 
       let line = state.buffer.lines[lineNum]
       let startCol = state.viewport.leftCol
@@ -281,9 +301,9 @@ proc render*(state: EditorState) =
             if tStart < tEndClamped and tStart < line.len:
               let typeName = if token.tokenType < tokenLegend.len: tokenLegend[token.tokenType] else: ""
               let color = tokenColor(typeName)
-              if color != 0: setFg(color)
+              if color != 0: setColorFg(color)
               stdout.write(line[tStart..<min(tEndClamped, line.len)])
-              if color != 0: resetAttributes()
+              if color != 0: setThemeFg()
             col = max(col, tEndClamped)
           if col < endCol: stdout.write(line[col..<endCol])
         elif useTsHighlight and lineNum < tsLines.len and tsLines[lineNum].len > 0:
@@ -301,22 +321,24 @@ proc render*(state: EditorState) =
             let tStart = max(token.col, max(startCol, col))
             let tEndClamped = min(tEnd, endCol)
             if tStart < tEndClamped and tStart < line.len:
-              if token.color != 0: setFg(token.color)
+              if token.color != 0: setColorFg(token.color)
               stdout.write(line[tStart..<min(tEndClamped, line.len)])
-              if token.color != 0: resetAttributes()
+              if token.color != 0: setThemeFg()
             col = max(col, tEndClamped)
           if col < endCol: stdout.write(line[col..<endCol])
         else:
           stdout.write(line[startCol..<endCol])
     else:
-      setDim()
+      setColorFg(colGutter)
       stdout.write("~")
-      resetAttributes()
+      setThemeFg()
 
   # Status line
   moveCursor(height - 1, 1)
+  resetAttributes()
+  setColorBg(colDarkBg)
+  setColorFg(colFg)
   clearLine()
-  setInverseVideo()
 
   let modeStr = case state.mode
     of mNormal: " NORMAL "
@@ -348,10 +370,10 @@ proc render*(state: EditorState) =
 
   let gap = max(totalWidth - leftPart.len - rightPart.len, 0)
   stdout.write(leftPart & spaces(gap) & rightPart)
-  resetAttributes()
 
   # Command / message line
   moveCursor(height, 1)
+  setThemeColors()
   clearLine()
   if state.mode == mCommand:
     stdout.write(":" & state.commandLine)
@@ -360,11 +382,13 @@ proc render*(state: EditorState) =
 
   # Modal overlays
   if state.mode == mLspManager:
+    setThemeColors()
     renderLspManagerModal(totalWidth, height)
     hideCursor()
     flushOut()
     return
   if state.mode == mTsManager:
+    setThemeColors()
     renderTsManagerModal(totalWidth, height)
     hideCursor()
     flushOut()
@@ -389,14 +413,14 @@ proc render*(state: EditorState) =
       let padded = label & spaces(max(0, maxWidth - label.len))
 
       if i == completionState.selectedIndex:
-        setInverseVideo()
+        setColorBg(colCursorLn)
         stdout.write(padded)
-        resetAttributes()
+        setThemeColors()
       else:
-        setFg(90)  # Gray background-like
-        setInverseVideo()
+        setColorBg(colDarkBg)
+        setColorFg(colFg)
         stdout.write(padded)
-        resetAttributes()
+        setThemeColors()
 
   # Position cursor
   if state.mode == mExplore:
