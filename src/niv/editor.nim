@@ -39,12 +39,15 @@ proc newEditorState*(filePath: string = ""): EditorState =
     let text = result.buffer.lines.join("\n")
     tryTsHighlight(filePath, text, result.buffer.lineCount)
 
-proc handleLspEvents(state: var EditorState) =
+proc handleLspEvents(state: var EditorState): bool =
   ## Poll and process all pending LSP events (non-blocking)
+  ## Returns true if any events were processed
+  result = false
   while true:
     let (hasEvent, event) = pollLspEvent()
     if not hasEvent:
       break
+    result = true
     case event.kind
     of lekResponse:
       let meth = popPendingRequest(event.requestId)
@@ -177,6 +180,8 @@ proc run*(state: var EditorState) =
     stopLsp()
     disableRawMode()
 
+  var needsRedraw = true
+
   while state.running:
     # Update viewport dimensions
     let size = getTerminalSize()
@@ -190,20 +195,28 @@ proc run*(state: var EditorState) =
     # Adjust viewport to keep cursor visible
     adjustViewport(state.viewport, state.cursor, state.buffer.lineCount)
 
-    # Render
-    render(state)
+    # Render only when something changed
+    if needsRedraw:
+      render(state)
+      needsRedraw = false
 
     # Poll LSP events (non-blocking)
-    handleLspEvents(state)
+    let hadLspEvents = handleLspEvents(state)
+    if hadLspEvents:
+      needsRedraw = true
 
     # Poll install/uninstall progress
-    pollInstallProgress()
-    pollTsInstallProgress()
+    let lspProgress = pollInstallProgress()
+    let tsProgress = pollTsInstallProgress()
+    if lspProgress or tsProgress:
+      needsRedraw = true
 
     # Read input (100ms timeout via VTIME=1)
     let key = readKey()
     if key.kind == kkNone:
       continue
+
+    needsRedraw = true
 
     # Dispatch to mode handler
     case state.mode

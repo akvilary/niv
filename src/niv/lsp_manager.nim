@@ -173,10 +173,11 @@ proc startUninstall*() =
   except OSError:
     lspMgr.statusMessage = "Failed to start uninstallation"
 
-proc pollInstallProgress*() =
+proc pollInstallProgress*(): bool =
   ## Non-blocking poll: drain output, update status, detect completion.
+  ## Returns true if there was activity.
   if not lspMgr.installing or installProc == nil:
-    return
+    return false
 
   # Read whatever is available from the pipe
   drainOutput()
@@ -188,7 +189,7 @@ proc pollInstallProgress*() =
 
   # Check if process has finished
   if installProc.running:
-    return
+    return true
 
   # Process done — final drain
   drainOutput()
@@ -220,3 +221,4 @@ proc pollInstallProgress*() =
 
   installIdx = -1
   installOutputBuf = ""
+  return true

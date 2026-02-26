@@ -206,9 +206,10 @@ proc startGrammarUninstall*() =
   except OSError:
     tsMgr.statusMessage = "Failed to start uninstallation"
 
-proc pollTsInstallProgress*() =
+proc pollTsInstallProgress*(): bool =
+  ## Returns true if there was activity.
   if not tsMgr.installing or tsInstallProc == nil:
-    return
+    return false
 
   drainTsOutput()
 
@@ -217,7 +218,7 @@ proc pollTsInstallProgress*() =
     tsMgr.statusMessage = lastLine
 
   if tsInstallProc.running:
-    return
+    return true
 
   # Process done
   drainTsOutput()
@@ -249,6 +250,7 @@ proc pollTsInstallProgress*() =
 
   tsInstallIdx = -1
   tsInstallOutputBuf = ""
+  return true
 
 proc findLanguageForFile*(filePath: string): string =
   ## Returns language name if a grammar is installed for this file extension
