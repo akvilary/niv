@@ -1,8 +1,12 @@
-## Syntax highlighting via LSP semantic tokens
+## Syntax highlighting
 ##
-## LSP semantic tokens are delta-encoded:
-##   data: [deltaLine, deltaStartChar, length, tokenType, tokenModifiers, ...]
-## We decode them into per-line token lists for efficient rendering.
+## Two sources:
+##   1. LSP semantic tokens (if server supports semanticTokensProvider)
+##   2. Tree-sitter highlight queries (fallback)
+##
+## Priority: LSP semantic tokens > tree-sitter > plain text
+
+import std/strutils
 
 type
   SemanticToken* = object
@@ -77,3 +81,52 @@ proc parseSemanticTokens*(data: seq[int], lineCount: int) =
 
 proc clearSemanticTokens*() =
   semanticLines = @[]
+
+# ---------------------------------------------------------------------------
+# Tree-sitter tokens
+# ---------------------------------------------------------------------------
+
+type
+  TsToken* = object
+    col*: int
+    length*: int
+    color*: int  ## Direct ANSI color code
+
+var tsLines*: seq[seq[TsToken]]
+
+proc captureColor*(captureName: string): int =
+  ## Map tree-sitter capture name (@keyword, @string.special, etc.) to ANSI color.
+  ## Handles dotted names by checking the base prefix.
+  let base = if '.' in captureName: captureName.split('.')[0]
+             else: captureName
+  case base
+  of "keyword": 35       # Magenta
+  of "conditional": 35   # Magenta
+  of "repeat": 35        # Magenta
+  of "include": 35       # Magenta
+  of "exception": 35     # Magenta
+  of "string": 32        # Green
+  of "character": 32     # Green
+  of "comment": 90       # Gray
+  of "number": 33        # Yellow
+  of "float": 33         # Yellow
+  of "boolean": 33       # Yellow
+  of "constant": 33      # Yellow
+  of "operator": 91      # Bright red
+  of "type": 36          # Cyan
+  of "constructor": 36   # Cyan
+  of "label": 36         # Cyan
+  of "attribute": 36     # Cyan
+  of "function": 33      # Yellow
+  of "method": 33        # Yellow
+  of "macro": 34         # Blue
+  of "namespace": 34     # Blue
+  of "tag": 34           # Blue
+  of "variable": 0       # Default
+  of "property": 0       # Default
+  of "parameter": 0      # Default
+  of "punctuation": 0    # Default
+  else: 0
+
+proc clearTsHighlight*() =
+  tsLines = @[]

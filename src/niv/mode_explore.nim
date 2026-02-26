@@ -8,6 +8,7 @@ import lsp_client
 import lsp_types
 import lsp_protocol
 import highlight
+import ts_highlight
 
 proc openFileFromSidebar(state: var EditorState, filePath: string) =
   ## Open a file from the sidebar with proper LSP integration
@@ -35,6 +36,11 @@ proc openFileFromSidebar(state: var EditorState, filePath: string) =
       addPendingRequest(stId, "textDocument/semanticTokens/full")
   elif lspState == lsOff:
     tryAutoStartLsp(filePath)
+
+  # Tree-sitter highlighting (if no LSP semantic tokens)
+  if tokenLegend.len == 0:
+    let text = state.buffer.lines.join("\n")
+    tryTsHighlight(filePath, text, state.buffer.lineCount)
 
 proc handleExploreMode*(state: var EditorState, key: InputKey) =
   state.statusMessage = ""

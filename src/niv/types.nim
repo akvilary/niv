@@ -30,6 +30,7 @@ type
     mCommand
     mExplore
     mLspManager
+    mTsManager
 
   Position* = object
     line*: int      # 0-indexed

@@ -12,11 +12,16 @@ import mode_insert
 import mode_command
 import mode_explore
 import mode_lsp_manager
+import mode_ts_manager
 import lsp_manager
+import ts_manager
 import lsp_client
 import lsp_types
 import lsp_protocol
 import highlight
+import ts_highlight
+
+var lspHasSemanticTokens*: bool = false
 
 proc newEditorState*(filePath: string = ""): EditorState =
   result.buffer = newBuffer(filePath)
@@ -25,9 +30,14 @@ proc newEditorState*(filePath: string = ""): EditorState =
   result.running = true
   result.sidebar = initSidebar()
   initLspManager()
+  initTsManager()
   # Auto-start LSP for .nim files
   if filePath.len > 0:
     tryAutoStartLsp(filePath)
+  # Tree-sitter auto-highlight (if grammar installed and LSP doesn't have semantic tokens)
+  if filePath.len > 0 and not lspHasSemanticTokens:
+    let text = result.buffer.lines.join("\n")
+    tryTsHighlight(filePath, text, result.buffer.lineCount)
 
 proc handleLspEvents(state: var EditorState) =
   ## Poll and process all pending LSP events (non-blocking)
@@ -47,12 +57,15 @@ proc handleLspEvents(state: var EditorState) =
           if caps.hasKey("capabilities"):
             let serverCaps = caps["capabilities"]
             if serverCaps.hasKey("semanticTokensProvider"):
+              lspHasSemanticTokens = true
               let stp = serverCaps["semanticTokensProvider"]
               if stp.hasKey("legend") and stp["legend"].hasKey("tokenTypes"):
                 var legend: seq[string]
                 for t in stp["legend"]["tokenTypes"]:
                   legend.add(t.getStr())
                 parseLegend(legend)
+                # LSP has semantic tokens — disable tree-sitter
+                clearTsHighlight()
         except JsonParsingError:
           discard
         sendToLsp(buildInitialized())
@@ -160,6 +173,7 @@ proc handleLspEvents(state: var EditorState) =
 proc run*(state: var EditorState) =
   enableRawMode()
   defer:
+    tsCleanup()
     stopLsp()
     disableRawMode()
 
@@ -184,6 +198,7 @@ proc run*(state: var EditorState) =
 
     # Poll install/uninstall progress
     pollInstallProgress()
+    pollTsInstallProgress()
 
     # Read input (100ms timeout via VTIME=1)
     let key = readKey()
@@ -202,3 +217,5 @@ proc run*(state: var EditorState) =
       handleExploreMode(state, key)
     of mLspManager:
       handleLspManagerMode(state, key)
+    of mTsManager:
+      handleTsManagerMode(state, key)

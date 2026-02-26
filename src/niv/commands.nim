@@ -9,6 +9,8 @@ import lsp_manager
 import lsp_client
 import lsp_protocol
 import highlight
+import ts_manager
+import ts_highlight
 
 type
   ExCommand* = enum
@@ -19,6 +21,7 @@ type
     ecEdit
     ecNvimTree
     ecLsp
+    ecTs
     ecUnknown
 
 proc parseCommand*(input: string): (ExCommand, string) =
@@ -41,6 +44,8 @@ proc parseCommand*(input: string): (ExCommand, string) =
     return (ecNvimTree, "")
   elif trimmed == "lsp":
     return (ecLsp, "")
+  elif trimmed == "ts":
+    return (ecTs, "")
   else:
     return (ecUnknown, trimmed)
 
@@ -80,6 +85,7 @@ proc executeCommand*(state: var EditorState, cmd: ExCommand, arg: string) =
       # Close current document in LSP
       sendDidClose()
       clearSemanticTokens()
+      clearTsHighlight()
       state.buffer = newBuffer(arg)
       state.cursor = Position(line: 0, col: 0)
       state.viewport.topLine = 0
@@ -96,8 +102,13 @@ proc executeCommand*(state: var EditorState, cmd: ExCommand, arg: string) =
           addPendingRequest(stId, "textDocument/semanticTokens/full")
       else:
         tryAutoStartLsp(arg)
+      # Tree-sitter highlighting (if no LSP semantic tokens)
+      if tokenLegend.len == 0:
+        let text = state.buffer.lines.join("\n")
+        tryTsHighlight(arg, text, state.buffer.lineCount)
     elif state.buffer.filePath.len > 0:
       clearSemanticTokens()
+      clearTsHighlight()
       state.buffer = newBuffer(state.buffer.filePath)
       state.cursor = Position(line: 0, col: 0)
       state.viewport.topLine = 0
@@ -111,6 +122,10 @@ proc executeCommand*(state: var EditorState, cmd: ExCommand, arg: string) =
           let stId = nextLspId()
           sendToLsp(buildSemanticTokensFull(stId, lspDocumentUri))
           addPendingRequest(stId, "textDocument/semanticTokens/full")
+      # Re-highlight with tree-sitter
+      if tokenLegend.len == 0:
+        let text = state.buffer.lines.join("\n")
+        tryTsHighlight(state.buffer.filePath, text, state.buffer.lineCount)
     else:
       state.statusMessage = "No file name"
 
@@ -123,6 +138,10 @@ proc executeCommand*(state: var EditorState, cmd: ExCommand, arg: string) =
   of ecLsp:
     openLspManager()
     state.mode = mLspManager
+
+  of ecTs:
+    openTsManager()
+    state.mode = mTsManager
 
   of ecUnknown:
     state.statusMessage = "Not an editor command: " & arg
