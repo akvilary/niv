@@ -1,8 +1,40 @@
 ## Explore mode (sidebar focused) key handler
 
+import std/strutils
 import types
 import buffer
 import sidebar
+import lsp_client
+import lsp_types
+import lsp_protocol
+import highlight
+
+proc openFileFromSidebar(state: var EditorState, filePath: string) =
+  ## Open a file from the sidebar with proper LSP integration
+  # Close old document in LSP
+  if lspState == lsRunning:
+    sendDidClose()
+  clearSemanticTokens()
+
+  state.buffer = newBuffer(filePath)
+  state.cursor = Position(line: 0, col: 0)
+  state.viewport.topLine = 0
+  state.viewport.leftCol = 0
+  state.sidebar.focused = false
+  state.mode = mNormal
+  state.statusMessage = "\"" & filePath & "\""
+
+  # Open in LSP + request semantic tokens
+  if lspState == lsRunning:
+    let text = state.buffer.lines.join("\n")
+    lspDocumentUri = filePathToUri(filePath)
+    sendDidOpen(filePath, text)
+    if tokenLegend.len > 0:
+      let stId = nextLspId()
+      sendToLsp(buildSemanticTokensFull(stId, lspDocumentUri))
+      addPendingRequest(stId, "textDocument/semanticTokens/full")
+  elif lspState == lsOff:
+    tryAutoStartLsp(filePath)
 
 proc handleExploreMode*(state: var EditorState, key: InputKey) =
   state.statusMessage = ""
@@ -25,13 +57,7 @@ proc handleExploreMode*(state: var EditorState, key: InputKey) =
     of 'l':
       let filePath = sidebarExpandOrOpen(state.sidebar)
       if filePath.len > 0:
-        state.buffer = newBuffer(filePath)
-        state.cursor = Position(line: 0, col: 0)
-        state.viewport.topLine = 0
-        state.viewport.leftCol = 0
-        state.sidebar.focused = false
-        state.mode = mNormal
-        state.statusMessage = "\"" & filePath & "\""
+        openFileFromSidebar(state, filePath)
     of 'h':
       sidebarCollapse(state.sidebar)
     of '-':
@@ -46,13 +72,7 @@ proc handleExploreMode*(state: var EditorState, key: InputKey) =
   of kkEnter:
     let filePath = sidebarExpandOrOpen(state.sidebar)
     if filePath.len > 0:
-      state.buffer = newBuffer(filePath)
-      state.cursor = Position(line: 0, col: 0)
-      state.viewport.topLine = 0
-      state.viewport.leftCol = 0
-      state.sidebar.focused = false
-      state.mode = mNormal
-      state.statusMessage = "\"" & filePath & "\""
+      openFileFromSidebar(state, filePath)
 
   of kkArrowDown:
     sidebarMoveDown(state.sidebar)

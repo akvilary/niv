@@ -29,6 +29,7 @@ type
     mInsert
     mCommand
     mExplore
+    mLspManager
 
   Position* = object
     line*: int      # 0-indexed

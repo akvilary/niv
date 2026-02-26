@@ -4,7 +4,7 @@ author        = "akvilary"
 description   = "A Vim-like terminal text editor"
 license       = "MIT"
 srcDir        = "src"
-bin           = @["nimvim"]
+bin           = @["niv"]
 
 # Dependencies
 requires "nim >= 2.2.0"

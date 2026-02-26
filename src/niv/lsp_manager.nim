@@ -1,0 +1,222 @@
+## LSP server manager (Mason-like registry, install/uninstall)
+## Servers are installed into ~/.config/niv/lsp/ (managed directory)
+
+import std/[osproc, os, strutils, posix]
+
+const
+  nivConfigDir* = ".config" / "niv"
+  nivLspDir* = nivConfigDir / "lsp"
+  nivLspBinDir* = nivLspDir / "bin"
+
+type
+  LspServerCategory* = enum
+    scLsp
+    scDap
+    scLinter
+    scFormatter
+
+  LspServerInfo* = object
+    name*: string
+    command*: string       ## Executable name
+    installCmd*: string    ## Shell command to install
+    uninstallCmd*: string  ## Shell command to uninstall
+    languages*: seq[string]
+    category*: LspServerCategory
+    installed*: bool
+
+  LspManagerState* = object
+    visible*: bool
+    servers*: seq[LspServerInfo]
+    cursorIndex*: int
+    scrollOffset*: int
+    statusMessage*: string
+    installing*: bool      ## True while install/uninstall runs in background
+
+var lspMgr*: LspManagerState
+var installProc: Process
+var installIdx: int = -1
+var installIsUninstall: bool = false
+var installOutputBuf: string = ""
+var installOutputFd: cint = -1
+
+proc lspBaseDir*(): string =
+  ## Returns the full path to ~/.config/niv/lsp
+  getHomeDir() / nivLspDir
+
+proc lspBinDir*(): string =
+  ## Returns the full path to ~/.config/niv/lsp/bin
+  getHomeDir() / nivLspBinDir
+
+proc serverBinPath*(command: string): string =
+  ## Returns the full path to a server binary in the managed directory
+  lspBinDir() / command
+
+proc ensureLspDirs*() =
+  ## Create ~/.config/niv/lsp/bin if it doesn't exist
+  createDir(lspBinDir())
+
+proc checkInstalled(server: var LspServerInfo) =
+  server.installed = fileExists(serverBinPath(server.command))
+
+proc initLspManager*() =
+  ensureLspDirs()
+  let base = lspBaseDir()
+  lspMgr.servers = @[
+    LspServerInfo(
+      name: "nimlangserver",
+      command: "nimlangserver",
+      installCmd: "nimble install nimlangserver -y --nimbleDir:" & base,
+      uninstallCmd: "nimble uninstall nimlangserver -y --nimbleDir:" & base,
+      languages: @["nim"],
+      category: scLsp,
+    ),
+  ]
+  for i in 0..<lspMgr.servers.len:
+    checkInstalled(lspMgr.servers[i])
+
+proc openLspManager*() =
+  for i in 0..<lspMgr.servers.len:
+    checkInstalled(lspMgr.servers[i])
+  lspMgr.visible = true
+  lspMgr.cursorIndex = 0
+  lspMgr.scrollOffset = 0
+  if not lspMgr.installing:
+    lspMgr.statusMessage = ""
+
+proc closeLspManager*() =
+  lspMgr.visible = false
+  if not lspMgr.installing:
+    lspMgr.statusMessage = ""
+
+proc managerMoveUp*() =
+  if lspMgr.cursorIndex > 0:
+    dec lspMgr.cursorIndex
+
+proc managerMoveDown*() =
+  if lspMgr.cursorIndex < lspMgr.servers.len - 1:
+    inc lspMgr.cursorIndex
+
+proc setNonBlocking(fd: cint) =
+  let flags = fcntl(fd, F_GETFL)
+  discard fcntl(fd, F_SETFL, flags or O_NONBLOCK)
+
+proc lastMeaningfulLine(buf: string): string =
+  ## Extract the last non-empty line from accumulated output
+  let lines = buf.strip().splitLines()
+  for i in countdown(lines.len - 1, 0):
+    let line = lines[i].strip()
+    if line.len > 0:
+      return line
+  return ""
+
+proc drainOutput() =
+  ## Non-blocking read of whatever is available from the install process stdout
+  if installOutputFd < 0:
+    return
+  var chunk: array[4096, char]
+  while true:
+    let n = posix.read(installOutputFd, addr chunk[0], chunk.len)
+    if n <= 0:
+      break
+    for i in 0..<n:
+      installOutputBuf.add(chunk[i])
+
+proc startInstall*() =
+  if lspMgr.installing:
+    lspMgr.statusMessage = "Already installing..."
+    return
+  if lspMgr.cursorIndex >= lspMgr.servers.len:
+    lspMgr.statusMessage = "No server selected"
+    return
+  let server = lspMgr.servers[lspMgr.cursorIndex]
+  if server.installed:
+    lspMgr.statusMessage = server.name & " is already installed"
+    return
+
+  ensureLspDirs()
+
+  try:
+    installProc = startProcess("/bin/sh", args = ["-c", server.installCmd],
+                               options = {poStdErrToStdOut})
+    installIdx = lspMgr.cursorIndex
+    installIsUninstall = false
+    installOutputBuf = ""
+    installOutputFd = cint(installProc.outputHandle)
+    setNonBlocking(installOutputFd)
+    lspMgr.installing = true
+    lspMgr.statusMessage = "Installing " & server.name & "..."
+  except OSError:
+    lspMgr.statusMessage = "Failed to start installation"
+
+proc startUninstall*() =
+  if lspMgr.installing:
+    lspMgr.statusMessage = "Already in progress..."
+    return
+  if lspMgr.cursorIndex >= lspMgr.servers.len:
+    lspMgr.statusMessage = "No server selected"
+    return
+  let server = lspMgr.servers[lspMgr.cursorIndex]
+  if not server.installed:
+    lspMgr.statusMessage = server.name & " is not installed"
+    return
+
+  try:
+    installProc = startProcess("/bin/sh", args = ["-c", server.uninstallCmd],
+                               options = {poStdErrToStdOut})
+    installIdx = lspMgr.cursorIndex
+    installIsUninstall = true
+    installOutputBuf = ""
+    installOutputFd = cint(installProc.outputHandle)
+    setNonBlocking(installOutputFd)
+    lspMgr.installing = true
+    lspMgr.statusMessage = "Uninstalling " & server.name & "..."
+  except OSError:
+    lspMgr.statusMessage = "Failed to start uninstallation"
+
+proc pollInstallProgress*() =
+  ## Non-blocking poll: drain output, update status, detect completion.
+  if not lspMgr.installing or installProc == nil:
+    return
+
+  # Read whatever is available from the pipe
+  drainOutput()
+
+  # Update status message with latest output line
+  let lastLine = lastMeaningfulLine(installOutputBuf)
+  if lastLine.len > 0:
+    lspMgr.statusMessage = lastLine
+
+  # Check if process has finished
+  if installProc.running:
+    return
+
+  # Process done — final drain
+  drainOutput()
+  let exitCode = installProc.peekExitCode()
+  installProc.close()
+  installProc = nil
+  installOutputFd = -1
+  lspMgr.installing = false
+
+  let serverName = if installIdx >= 0 and installIdx < lspMgr.servers.len:
+    lspMgr.servers[installIdx].name
+  else:
+    "server"
+
+  if exitCode == 0:
+    if installIdx >= 0 and installIdx < lspMgr.servers.len:
+      checkInstalled(lspMgr.servers[installIdx])
+    if installIsUninstall:
+      lspMgr.statusMessage = serverName & " uninstalled"
+    else:
+      lspMgr.statusMessage = serverName & " installed successfully"
+  else:
+    let errLine = lastMeaningfulLine(installOutputBuf)
+    let detail = if errLine.len > 0: ": " & errLine else: ""
+    if installIsUninstall:
+      lspMgr.statusMessage = "Failed to uninstall" & detail
+    else:
+      lspMgr.statusMessage = "Failed to install" & detail
+
+  installIdx = -1
+  installOutputBuf = ""

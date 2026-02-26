@@ -5,6 +5,10 @@ import types
 import buffer
 import fileio
 import sidebar
+import lsp_manager
+import lsp_client
+import lsp_protocol
+import highlight
 
 type
   ExCommand* = enum
@@ -14,6 +18,7 @@ type
     ecForceQuit
     ecEdit
     ecNvimTree
+    ecLsp
     ecUnknown
 
 proc parseCommand*(input: string): (ExCommand, string) =
@@ -34,6 +39,8 @@ proc parseCommand*(input: string): (ExCommand, string) =
     return (ecEdit, "")
   elif trimmed == "NvimTree":
     return (ecNvimTree, "")
+  elif trimmed == "lsp":
+    return (ecLsp, "")
   else:
     return (ecUnknown, trimmed)
 
@@ -70,17 +77,40 @@ proc executeCommand*(state: var EditorState, cmd: ExCommand, arg: string) =
 
   of ecEdit:
     if arg.len > 0:
+      # Close current document in LSP
+      sendDidClose()
+      clearSemanticTokens()
       state.buffer = newBuffer(arg)
       state.cursor = Position(line: 0, col: 0)
       state.viewport.topLine = 0
       state.viewport.leftCol = 0
       state.statusMessage = "\"" & arg & "\""
+      # Open new file in LSP
+      if lspIsActive():
+        let text = state.buffer.lines.join("\n")
+        lspDocumentUri = filePathToUri(arg)
+        sendDidOpen(arg, text)
+        if tokenLegend.len > 0:
+          let stId = nextLspId()
+          sendToLsp(buildSemanticTokensFull(stId, lspDocumentUri))
+          addPendingRequest(stId, "textDocument/semanticTokens/full")
+      else:
+        tryAutoStartLsp(arg)
     elif state.buffer.filePath.len > 0:
+      clearSemanticTokens()
       state.buffer = newBuffer(state.buffer.filePath)
       state.cursor = Position(line: 0, col: 0)
       state.viewport.topLine = 0
       state.viewport.leftCol = 0
       state.statusMessage = "\"" & state.buffer.filePath & "\" reloaded"
+      # Re-send didOpen for reloaded file
+      if lspIsActive():
+        let text = state.buffer.lines.join("\n")
+        sendDidOpen(state.buffer.filePath, text)
+        if tokenLegend.len > 0:
+          let stId = nextLspId()
+          sendToLsp(buildSemanticTokensFull(stId, lspDocumentUri))
+          addPendingRequest(stId, "textDocument/semanticTokens/full")
     else:
       state.statusMessage = "No file name"
 
@@ -89,6 +119,10 @@ proc executeCommand*(state: var EditorState, cmd: ExCommand, arg: string) =
     if state.sidebar.visible:
       state.sidebar.focused = true
       state.mode = mExplore
+
+  of ecLsp:
+    openLspManager()
+    state.mode = mLspManager
 
   of ecUnknown:
     state.statusMessage = "Not an editor command: " & arg

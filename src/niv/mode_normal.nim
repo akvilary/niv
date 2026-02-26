@@ -6,6 +6,9 @@ import cursor
 import input
 import undo
 import sidebar
+import lsp_types
+import lsp_client
+import lsp_protocol
 
 proc handleNormalMode*(state: var EditorState, key: InputKey) =
   state.statusMessage = ""
@@ -164,6 +167,15 @@ proc handleNormalMode*(state: var EditorState, key: InputKey) =
   of akRedo:
     let pos = state.buffer.undo.redo(state.buffer)
     state.cursor = clampCursor(state.buffer, pos, mNormal)
+
+  of akGotoDefinition:
+    if lspState == lsRunning and lspDocumentUri.len > 0:
+      let id = nextLspId()
+      sendToLsp(buildDefinition(id, lspDocumentUri, state.cursor.line, state.cursor.col))
+      addPendingRequest(id, "textDocument/definition")
+      state.statusMessage = "LSP: goto definition..."
+    else:
+      state.statusMessage = "LSP not active"
 
   of akEnterCommand:
     state.mode = mCommand

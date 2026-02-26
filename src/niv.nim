@@ -1,7 +1,7 @@
-## nimvim — A Vim-like terminal text editor
+## niv — A Vim-like terminal text editor
 
 import std/os
-import nimvim/editor
+import niv/editor
 
 proc main() =
   let args = commandLineParams()

@@ -155,6 +155,13 @@ proc setInverseVideo*() =
 proc setDim*() =
   stdout.write("\e[2m")
 
+proc setFg*(ansiCode: int) =
+  ## Set foreground color using ANSI code (e.g. 31=red, 33=yellow, 32=green)
+  stdout.write("\e[" & $ansiCode & "m")
+
+proc setUnderline*() =
+  stdout.write("\e[4m")
+
 proc resetAttributes*() =
   stdout.write("\e[0m")
 
