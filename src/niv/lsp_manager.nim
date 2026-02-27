@@ -161,6 +161,16 @@ proc initLspManager*() =
       bundled: true,
       enabledByDefault: true,
     ),
+    LspServerInfo(
+      name: "niv_md_lsp",
+      command: "niv_md_lsp",
+      languages: @["markdown"],
+      extensions: @[".md", ".markdown"],
+      languageId: "markdown",
+      category: scLsp,
+      bundled: true,
+      enabledByDefault: true,
+    ),
   ]
   for i in 0..<lspMgr.servers.len:
     checkInstalled(lspMgr.servers[i])
