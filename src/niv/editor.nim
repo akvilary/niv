@@ -161,13 +161,12 @@ proc handleLspEvents(state: var EditorState): bool =
             var data: seq[int]
             for v in resultNode["data"]:
               data.add(v.getInt())
-            # Merge range tokens into existing semantic lines
-            # Grow semanticLines if needed
             if semanticLines.len < state.buffer.lineCount:
               semanticLines.setLen(state.buffer.lineCount)
-            # Parse range tokens — they use absolute line positions
+            # Replace tokens: clear each line before adding fresh tokens
             var currentLine = 0
             var currentCol = 0
+            var lastClearedLine = -1
             var i = 0
             while i + 4 < data.len:
               let deltaLine = data[i]
@@ -181,18 +180,15 @@ proc handleLspEvents(state: var EditorState): bool =
               else:
                 currentCol += deltaStart
               if currentLine < semanticLines.len:
-                # Check if token already exists to avoid duplicates
-                var found = false
-                for tok in semanticLines[currentLine]:
-                  if tok.col == currentCol and tok.length == length:
-                    found = true
-                    break
-                if not found:
-                  semanticLines[currentLine].add(SemanticToken(
-                    col: currentCol,
-                    length: length,
-                    tokenType: tokenType,
-                  ))
+                # Clear line on first encounter — replace stale tokens
+                if currentLine != lastClearedLine:
+                  semanticLines[currentLine] = @[]
+                  lastClearedLine = currentLine
+                semanticLines[currentLine].add(SemanticToken(
+                  col: currentCol,
+                  length: length,
+                  tokenType: tokenType,
+                ))
         except JsonParsingError:
           discard
         if event.requestId == bgHighlightRequestId:

@@ -46,6 +46,16 @@ proc closeCompletion*() =
   completionState.active = false
   completionState.items = @[]
 
+proc sendEditUpdate(state: EditorState, startLine, endLine: int) =
+  ## Send didChange + request range tokens for edited lines
+  if lspState != lsRunning or state.buffer.filePath.len == 0:
+    return
+  sendDidChange(state.buffer.lines.join("\n"))
+  lspSyncedLines = state.buffer.lineCount
+  resetViewportRangeCache()
+  if tokenLegend.len > 0 and lspHasSemanticTokensRange:
+    sendSemanticTokensRange(startLine, endLine)
+
 proc handleInsertMode*(state: var EditorState, key: InputKey) =
   case key.kind
   of kkEscape:
@@ -55,13 +65,11 @@ proc handleInsertMode*(state: var EditorState, key: InputKey) =
     state.mode = mNormal
     # Clamp cursor (in Normal, cursor can't be past last char)
     state.cursor = clampCursor(state.buffer, state.cursor, mNormal)
-    # Notify LSP of buffer changes
+    # Final LSP sync
     if lspIsActive() and state.buffer.filePath.len > 0:
       sendDidChange(state.buffer.lines.join("\n"))
-      if tokenLegend.len > 0 and lspHasSemanticTokensRange:
-        sendSemanticTokensRange(state.viewport.topLine,
-          min(state.viewport.topLine + state.viewport.height - 1,
-              state.buffer.lineCount - 1))
+      lspSyncedLines = state.buffer.lineCount
+
   of kkChar:
     if completionState.active:
       closeCompletion()
@@ -72,11 +80,15 @@ proc handleInsertMode*(state: var EditorState, key: InputKey) =
     ))
     state.buffer.insertChar(state.cursor, key.ch)
     state.cursor.col += 1
+    # Shift tokens right from insertion point
+    shiftTokensRight(state.cursor.line, state.cursor.col - 1, 1)
+    sendEditUpdate(state, state.cursor.line, state.cursor.line)
 
   of kkEnter:
     if completionState.active:
       acceptCompletion(state)
     else:
+      let splitCol = state.cursor.col
       state.buffer.undo.pushUndo(UndoEntry(
         op: uoSplitLine,
         pos: state.cursor,
@@ -84,6 +96,9 @@ proc handleInsertMode*(state: var EditorState, key: InputKey) =
       state.buffer.splitLine(state.cursor)
       state.cursor.line += 1
       state.cursor.col = 0
+      # Split semantic tokens at the split point
+      splitSemanticLine(state.cursor.line - 1, splitCol)
+      sendEditUpdate(state, state.cursor.line - 1, state.cursor.line)
 
   of kkBackspace:
     if completionState.active:
@@ -96,6 +111,9 @@ proc handleInsertMode*(state: var EditorState, key: InputKey) =
         pos: state.cursor,
         text: $ch,
       ))
+      # Shift tokens left from deletion point
+      shiftTokensLeft(state.cursor.line, state.cursor.col, 1)
+      sendEditUpdate(state, state.cursor.line, state.cursor.line)
     elif state.cursor.line > 0:
       # Join with previous line
       let prevLineLen = state.buffer.lineLen(state.cursor.line - 1)
@@ -106,6 +124,9 @@ proc handleInsertMode*(state: var EditorState, key: InputKey) =
       state.buffer.joinLines(state.cursor.line - 1)
       state.cursor.line -= 1
       state.cursor.col = prevLineLen
+      # Merge semantic tokens from joined line
+      joinSemanticLines(state.cursor.line, state.cursor.col)
+      sendEditUpdate(state, state.cursor.line, state.cursor.line)
 
   of kkDelete:
     if completionState.active:
@@ -117,12 +138,19 @@ proc handleInsertMode*(state: var EditorState, key: InputKey) =
         pos: state.cursor,
         text: $ch,
       ))
+      # Shift tokens left from deletion point
+      shiftTokensLeft(state.cursor.line, state.cursor.col, 1)
+      sendEditUpdate(state, state.cursor.line, state.cursor.line)
     elif state.cursor.line < state.buffer.lastLine:
+      let joinCol = state.buffer.lineLen(state.cursor.line)
       state.buffer.undo.pushUndo(UndoEntry(
         op: uoJoinLines,
         pos: state.cursor,
       ))
       state.buffer.joinLines(state.cursor.line)
+      # Merge semantic tokens from joined line
+      joinSemanticLines(state.cursor.line, joinCol)
+      sendEditUpdate(state, state.cursor.line, state.cursor.line)
 
   of kkTab:
     if completionState.active:
@@ -137,6 +165,9 @@ proc handleInsertMode*(state: var EditorState, key: InputKey) =
         ))
         state.buffer.insertChar(state.cursor, ' ')
         state.cursor.col += 1
+      # Shift tokens right by 2 from tab insertion point
+      shiftTokensRight(state.cursor.line, state.cursor.col - 2, 2)
+      sendEditUpdate(state, state.cursor.line, state.cursor.line)
 
   of kkArrowUp:
     if completionState.active:

@@ -82,3 +82,67 @@ proc clearSemanticTokens*() =
 
 proc clearTokenLegend*() =
   tokenLegend = @[]
+
+# ---------------------------------------------------------------------------
+# Token shifting for Insert mode edits
+# ---------------------------------------------------------------------------
+
+proc shiftTokensRight*(lineNum: int, fromCol: int, amount: int) =
+  ## After insertChar: shift tokens right from insertion point
+  if lineNum >= semanticLines.len: return
+  for i in 0..<semanticLines[lineNum].len:
+    if semanticLines[lineNum][i].col >= fromCol:
+      semanticLines[lineNum][i].col += amount
+    elif semanticLines[lineNum][i].col + semanticLines[lineNum][i].length > fromCol:
+      semanticLines[lineNum][i].length += amount
+
+proc shiftTokensLeft*(lineNum: int, fromCol: int, amount: int) =
+  ## After deleteChar: shift tokens left from deletion point
+  if lineNum >= semanticLines.len: return
+  var toRemove: seq[int]
+  for i in 0..<semanticLines[lineNum].len:
+    if semanticLines[lineNum][i].col > fromCol:
+      semanticLines[lineNum][i].col -= amount
+    elif semanticLines[lineNum][i].col + semanticLines[lineNum][i].length > fromCol:
+      semanticLines[lineNum][i].length -= amount
+      if semanticLines[lineNum][i].length <= 0:
+        toRemove.add(i)
+  for i in countdown(toRemove.len - 1, 0):
+    semanticLines[lineNum].delete(toRemove[i])
+
+proc splitSemanticLine*(lineNum: int, splitCol: int) =
+  ## After splitLine (Enter): split tokens at splitCol into two lines
+  if lineNum >= semanticLines.len:
+    if semanticLines.len > lineNum:
+      semanticLines.insert(@[], lineNum + 1)
+    return
+  var keepTokens: seq[SemanticToken]
+  var moveTokens: seq[SemanticToken]
+  for tok in semanticLines[lineNum]:
+    if tok.col + tok.length <= splitCol:
+      keepTokens.add(tok)
+    elif tok.col >= splitCol:
+      moveTokens.add(SemanticToken(col: tok.col - splitCol,
+                                    length: tok.length,
+                                    tokenType: tok.tokenType))
+    else:
+      keepTokens.add(SemanticToken(col: tok.col,
+                                    length: splitCol - tok.col,
+                                    tokenType: tok.tokenType))
+      let remainder = tok.length - (splitCol - tok.col)
+      if remainder > 0:
+        moveTokens.add(SemanticToken(col: 0, length: remainder,
+                                      tokenType: tok.tokenType))
+  semanticLines[lineNum] = keepTokens
+  semanticLines.insert(moveTokens, lineNum + 1)
+
+proc joinSemanticLines*(lineNum: int, joinCol: int) =
+  ## After joinLines (Backspace at line start): merge lineNum+1 into lineNum
+  if lineNum >= semanticLines.len: return
+  if lineNum + 1 < semanticLines.len:
+    for tok in semanticLines[lineNum + 1]:
+      semanticLines[lineNum].add(SemanticToken(
+        col: tok.col + joinCol,
+        length: tok.length,
+        tokenType: tok.tokenType))
+    semanticLines.delete(lineNum + 1)
