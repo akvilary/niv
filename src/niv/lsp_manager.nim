@@ -171,6 +171,16 @@ proc initLspManager*() =
       bundled: true,
       enabledByDefault: true,
     ),
+    LspServerInfo(
+      name: "niv_bash_lsp",
+      command: "niv_bash_lsp",
+      languages: @["bash"],
+      extensions: @[".sh", ".bash", ".zsh"],
+      languageId: "shellscript",
+      category: scLsp,
+      bundled: true,
+      enabledByDefault: true,
+    ),
   ]
   for i in 0..<lspMgr.servers.len:
     checkInstalled(lspMgr.servers[i])

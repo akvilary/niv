@@ -5,10 +5,12 @@
 /niv_toml_lsp
 /niv_yaml_lsp
 /niv_md_lsp
+/niv_bash_lsp
 /src/niv_json_lsp
 /src/niv_python_lsp
 /src/niv_nim_lsp
 /src/niv_toml_lsp
 /src/niv_yaml_lsp
 /src/niv_md_lsp
+/src/niv_bash_lsp
 test.txt
