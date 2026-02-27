@@ -264,7 +264,7 @@ proc render*(state: EditorState) =
                         elif bgHighlightTotalLines > 0: bgHighlightTotalLines
                         else: 0
       let pct = min(100, highlighted * 100 div state.buffer.lineCount)
-      " [LSP|" & $pct & "%]"
+      " [LSP:" & $pct & "%]"
     else: " [LSP]"
   let loadingIndicator = if not state.buffer.fullyLoaded and state.buffer.totalSize > 0:
     let pct = int(state.buffer.loadedBytes * 100 div state.buffer.totalSize)
