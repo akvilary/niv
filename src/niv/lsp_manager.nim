@@ -191,6 +191,16 @@ proc initLspManager*() =
       bundled: true,
       enabledByDefault: true,
     ),
+    LspServerInfo(
+      name: "niv_html_lsp",
+      command: "niv_html_lsp",
+      languages: @["html"],
+      extensions: @[".html", ".htm"],
+      languageId: "html",
+      category: scLsp,
+      bundled: true,
+      enabledByDefault: true,
+    ),
   ]
   for i in 0..<lspMgr.servers.len:
     checkInstalled(lspMgr.servers[i])
