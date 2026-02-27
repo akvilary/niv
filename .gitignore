@@ -1,7 +1,8 @@
 /niv
 /niv_json_lsp
 /niv_python_lsp
+/niv_nim_lsp
 /src/niv_json_lsp
 /src/niv_python_lsp
+/src/niv_nim_lsp
 test.txt
-deps/

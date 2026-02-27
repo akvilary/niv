@@ -12,14 +12,11 @@ import mode_insert
 import mode_command
 import mode_explore
 import mode_lsp_manager
-import mode_ts_manager
 import lsp_manager
-import ts_manager
 import lsp_client
 import lsp_types
 import lsp_protocol
 import highlight
-import ts_highlight
 import fileio
 
 var lspHasSemanticTokens*: bool = false
@@ -33,14 +30,8 @@ proc newEditorState*(filePath: string = ""): EditorState =
   result.running = true
   result.sidebar = initSidebar()
   initLspManager()
-  initTsManager()
-  # Auto-start LSP for .nim files
   if filePath.len > 0:
     tryAutoStartLsp(filePath)
-  # Tree-sitter auto-highlight (if grammar installed and LSP doesn't have semantic tokens)
-  if filePath.len > 0 and not lspHasSemanticTokens:
-    let text = result.buffer.lines.join("\n")
-    tryTsHighlight(filePath, text, result.buffer.lineCount)
 
 proc syncLspToLine(state: EditorState, targetLine: int) =
   ## Lazy sync: ensure LSP has text at least up to targetLine
@@ -97,8 +88,6 @@ proc handleLspEvents(state: var EditorState): bool =
                 for t in stp["legend"]["tokenTypes"]:
                   legend.add(t.getStr())
                 parseLegend(legend)
-                # LSP has semantic tokens — disable tree-sitter
-                clearTsHighlight()
         except JsonParsingError:
           discard
         sendToLsp(buildInitialized())
@@ -151,7 +140,6 @@ proc handleLspEvents(state: var EditorState): bool =
               lastRangeEndLine = -1
               state.buffer = newBuffer(filePath)
               let text = state.buffer.lines.join("\n")
-              tryTsHighlight(filePath, text, state.buffer.lineCount)
               lspDocumentUri = filePathToUri(filePath)
               sendDidOpen(filePath, text)
               lspSyncedLines = state.buffer.lineCount
@@ -288,7 +276,6 @@ proc handleFileLoaderEvents(state: var EditorState): bool =
 proc run*(state: var EditorState) =
   enableRawMode()
   defer:
-    tsCleanup()
     stopLsp()
     disableRawMode()
 
@@ -341,8 +328,7 @@ proc run*(state: var EditorState) =
 
     # Poll install/uninstall progress
     let lspProgress = pollInstallProgress()
-    let tsProgress = pollTsInstallProgress()
-    if lspProgress or tsProgress:
+    if lspProgress:
       needsRedraw = true
 
     # Read input (100ms timeout via VTIME=1)
@@ -364,8 +350,6 @@ proc run*(state: var EditorState) =
       handleExploreMode(state, key)
     of mLspManager:
       handleLspManagerMode(state, key)
-    of mTsManager:
-      handleTsManagerMode(state, key)
 
     # Pause/resume file loader on insert mode transitions
     if state.mode != prevMode:

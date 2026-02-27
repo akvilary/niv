@@ -132,14 +132,14 @@ proc initLspManager*() =
       enabledByDefault: true,
     ),
     LspServerInfo(
-      name: "nimlangserver",
-      command: "nimlangserver",
-      installCmd: "nimble install nimlangserver -y --nimbleDir:" & base,
-      uninstallCmd: "nimble uninstall nimlangserver -y --nimbleDir:" & base,
+      name: "niv_nim_lsp",
+      command: "niv_nim_lsp",
       languages: @["nim"],
       extensions: @[".nim", ".nims"],
       languageId: "nim",
       category: scLsp,
+      bundled: true,
+      enabledByDefault: true,
     ),
   ]
   for i in 0..<lspMgr.servers.len:

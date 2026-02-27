@@ -10,7 +10,6 @@ import lsp_manager
 import lsp_client
 import lsp_types
 import highlight
-import ts_manager
 
 # Tokyo Night Storm palette
 const
@@ -156,76 +155,6 @@ proc renderLspManagerModal(totalWidth, height: int) =
         let statusLine = " " & mgr.statusMessage
         renderModalRow(startCol, innerWidth, statusLine)
 
-proc renderTsManagerModal(totalWidth, height: int) =
-  let mgr = tsMgr
-  if not mgr.visible:
-    return
-
-  let modalWidth = min(totalWidth - 4, max(60, totalWidth * 2 div 3))
-  let hasStatus = mgr.statusMessage.len > 0
-  let contentRows = mgr.grammars.len + 3 + (if hasStatus: 1 else: 0)
-  let modalHeight = min(contentRows + 2, height - 4)
-  let startCol = (totalWidth - modalWidth) div 2 + 1
-  let startRow = (height - modalHeight) div 2 + 1
-  let innerWidth = modalWidth - 2
-
-  for row in 0..<modalHeight:
-    moveCursor(startRow + row, startCol)
-    if row == 0:
-      let title = " TreeSitter Manager "
-      let borderLen = modalWidth - 2 - title.len
-      let leftBorder = max(0, borderLen div 2)
-      let rightBorder = max(0, borderLen - leftBorder)
-      setColorFg(colGutter)
-      stdout.write("\xe2\x94\x8c")  # ┌
-      stdout.write("\xe2\x94\x80".repeat(leftBorder))  # ─
-      setThemeFg()
-      stdout.write(title)
-      setColorFg(colGutter)
-      stdout.write("\xe2\x94\x80".repeat(rightBorder))  # ─
-      stdout.write("\xe2\x94\x90")  # ┐
-      setThemeFg()
-    elif row == modalHeight - 1:
-      setColorFg(colGutter)
-      stdout.write("\xe2\x94\x94")  # └
-      stdout.write("\xe2\x94\x80".repeat(modalWidth - 2))  # ─
-      stdout.write("\xe2\x94\x98")  # ┘
-      setThemeFg()
-    else:
-      let contentRow = row - 1
-
-      if contentRow == 0:
-        renderModalRow(startCol, innerWidth, "")
-      elif contentRow >= 1 and contentRow <= mgr.grammars.len:
-        let idx = contentRow - 1
-        let g = mgr.grammars[idx]
-        let icon = if g.installed: "\xe2\x97\x8f " else: "\xe2\x97\x8b "  # ● / ○
-        let status = if g.installed: " [installed]" else: ""
-        let exts = " [" & g.extensions.join(", ") & "]"
-        let line = " " & icon & g.name & exts & status
-
-        if idx == mgr.cursorIndex:
-          setColorBg(colCursorLn)
-          setColorFg(colGutter)
-          stdout.write("\xe2\x94\x82")  # │
-          setThemeFg()
-          let truncated = if line.len > innerWidth: line[0..<innerWidth] else: line
-          stdout.write(truncated)
-          if truncated.len < innerWidth:
-            stdout.write(spaces(innerWidth - truncated.len))
-          setColorFg(colGutter)
-          stdout.write("\xe2\x94\x82")  # │
-          setThemeColors()
-        else:
-          renderModalRow(startCol, innerWidth, line)
-      elif contentRow == mgr.grammars.len + 1:
-        renderModalRow(startCol, innerWidth, "")
-      elif contentRow == mgr.grammars.len + 2:
-        renderModalRow(startCol, innerWidth, " i:install X:uninstall q:close")
-      elif contentRow == mgr.grammars.len + 3 and hasStatus:
-        let statusLine = " " & mgr.statusMessage
-        renderModalRow(startCol, innerWidth, statusLine)
-
 proc render*(state: EditorState) =
   let size = getTerminalSize()
   let totalWidth = size.width
@@ -238,7 +167,6 @@ proc render*(state: EditorState) =
   let lnWidth = lineNumberWidth(state.buffer.lineCount)
   let textWidth = editorWidth - lnWidth
   let useLspHighlight = semanticLines.len > 0
-  let useTsHighlight = not useLspHighlight and tsLines.len > 0
 
   hideCursor()
   setThemeColors()
@@ -306,26 +234,6 @@ proc render*(state: EditorState) =
               if color != 0: setThemeFg()
             col = max(col, tEndClamped)
           if col < endCol: stdout.write(line[col..<endCol])
-        elif useTsHighlight and lineNum < tsLines.len and tsLines[lineNum].len > 0:
-          # Tree-sitter tokens (fallback)
-          let tokens = tsLines[lineNum]
-          var col = startCol
-          for token in tokens:
-            let tEnd = token.col + token.length
-            if tEnd <= startCol: continue
-            if token.col >= endCol: break
-            if col < token.col:
-              let gapEnd = min(token.col, endCol)
-              if col < gapEnd: stdout.write(line[col..<gapEnd])
-              col = gapEnd
-            let tStart = max(token.col, max(startCol, col))
-            let tEndClamped = min(tEnd, endCol)
-            if tStart < tEndClamped and tStart < line.len:
-              if token.color != 0: setColorFg(token.color)
-              stdout.write(line[tStart..<min(tEndClamped, line.len)])
-              if token.color != 0: setThemeFg()
-            col = max(col, tEndClamped)
-          if col < endCol: stdout.write(line[col..<endCol])
         else:
           stdout.write(line[startCol..<endCol])
     else:
@@ -346,7 +254,6 @@ proc render*(state: EditorState) =
     of mCommand: " COMMAND "
     of mExplore: " EXPLORE "
     of mLspManager: " LSP "
-    of mTsManager: " TS "
 
   let filename = if state.buffer.filePath.len > 0:
     state.buffer.filePath
@@ -399,13 +306,6 @@ proc render*(state: EditorState) =
     hideCursor()
     flushOut()
     return
-  if state.mode == mTsManager:
-    setThemeColors()
-    renderTsManagerModal(totalWidth, height)
-    hideCursor()
-    flushOut()
-    return
-
   # Completion popup overlay (drawn after main content)
   if completionState.active and completionState.items.len > 0 and state.mode == mInsert:
     let maxItems = min(10, completionState.items.len)

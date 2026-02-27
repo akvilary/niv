@@ -1,12 +1,4 @@
-## Syntax highlighting
-##
-## Two sources:
-##   1. LSP semantic tokens (if server supports semanticTokensProvider)
-##   2. Tree-sitter highlight queries (fallback)
-##
-## Priority: LSP semantic tokens > tree-sitter > plain text
-
-import std/strutils
+## Syntax highlighting via LSP semantic tokens
 
 type
   SemanticToken* = object
@@ -87,52 +79,3 @@ proc parseSemanticTokens*(data: seq[int], lineCount: int) =
 
 proc clearSemanticTokens*() =
   semanticLines = @[]
-
-# ---------------------------------------------------------------------------
-# Tree-sitter tokens
-# ---------------------------------------------------------------------------
-
-type
-  TsToken* = object
-    col*: int
-    length*: int
-    color*: int  ## 0xRRGGBB encoded color
-
-var tsLines*: seq[seq[TsToken]]
-
-proc captureColor*(captureName: string): int =
-  ## Map tree-sitter capture name to 0xRRGGBB (Tokyo Night Storm).
-  ## Handles dotted names by checking the base prefix.
-  let base = if '.' in captureName: captureName.split('.')[0]
-             else: captureName
-  case base
-  of "keyword": 0x9d7cd8       # Purple
-  of "conditional": 0x9d7cd8
-  of "repeat": 0x9d7cd8
-  of "include": 0x9d7cd8
-  of "exception": 0x9d7cd8
-  of "string": 0x9ece6a        # Green
-  of "character": 0x9ece6a
-  of "comment": 0x565f89       # Gray
-  of "number": 0xff9e64        # Orange
-  of "float": 0xff9e64
-  of "boolean": 0xff9e64
-  of "constant": 0xff9e64
-  of "operator": 0x89ddff      # Cyan
-  of "type": 0x2ac3de          # Bright cyan
-  of "constructor": 0x2ac3de
-  of "label": 0x2ac3de
-  of "attribute": 0x2ac3de
-  of "function": 0x7aa2f7      # Blue
-  of "method": 0x7aa2f7
-  of "macro": 0x9d7cd8         # Purple
-  of "namespace": 0x7aa2f7     # Blue
-  of "tag": 0x7aa2f7
-  of "variable": 0
-  of "property": 0x73daca      # Teal
-  of "parameter": 0xe0af68     # Yellow
-  of "punctuation": 0
-  else: 0
-
-proc clearTsHighlight*() =
-  tsLines = @[]

@@ -9,7 +9,6 @@ import lsp_types
 import lsp_client
 import lsp_protocol
 import highlight
-import ts_highlight
 
 proc acceptCompletion(state: var EditorState) =
   ## Accept the currently selected completion item
@@ -63,10 +62,6 @@ proc handleInsertMode*(state: var EditorState, key: InputKey) =
         sendSemanticTokensRange(state.viewport.topLine,
           min(state.viewport.topLine + state.viewport.height - 1,
               state.buffer.lineCount - 1))
-    # Re-highlight with tree-sitter (if active)
-    if tsState.active and state.buffer.filePath.len > 0:
-      tsParseAndHighlight(state.buffer.lines.join("\n"), state.buffer.lineCount)
-
   of kkChar:
     if completionState.active:
       closeCompletion()

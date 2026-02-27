@@ -7,7 +7,6 @@ import sidebar
 import lsp_client
 import lsp_types
 import highlight
-import ts_highlight
 
 proc openFileFromSidebar(state: var EditorState, filePath: string) =
   ## Open a file from the sidebar with proper LSP integration
@@ -36,11 +35,6 @@ proc openFileFromSidebar(state: var EditorState, filePath: string) =
       startBgHighlight(state.buffer.lineCount)
   elif lspState == lsOff:
     tryAutoStartLsp(filePath)
-
-  # Tree-sitter highlighting (if no LSP semantic tokens)
-  if tokenLegend.len == 0 and state.buffer.fullyLoaded:
-    let text = state.buffer.lines.join("\n")
-    tryTsHighlight(filePath, text, state.buffer.lineCount)
 
 proc handleExploreMode*(state: var EditorState, key: InputKey) =
   state.statusMessage = ""
