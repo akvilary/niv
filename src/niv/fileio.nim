@@ -21,6 +21,7 @@ type
 var fileLoaderChannel*: Channel[FileChunk]
 var fileLoaderThread: Thread[tuple[path: string, startOffset: int64, initialCarry: string]]
 var fileLoaderPaused*: Atomic[bool]
+var fileLoaderCancel*: Atomic[bool]
 var fileLoaderActive*: bool = false
 
 proc parseChunkLines(buf: string, carry: var string): seq[string] =
@@ -72,8 +73,17 @@ proc fileLoaderWorker(args: tuple[path: string, startOffset: int64, initialCarry
   var carry = args.initialCarry
 
   while true:
+    # Check cancel flag
+    if fileLoaderCancel.load():
+      fileLoaderChannel.send(FileChunk(kind: fckDone))
+      discard posix.close(fd)
+      return
     # Check pause flag
     while fileLoaderPaused.load():
+      if fileLoaderCancel.load():
+        fileLoaderChannel.send(FileChunk(kind: fckDone))
+        discard posix.close(fd)
+        return
       os.sleep(10)
 
     let n = posix.read(fd, addr buf[0], ChunkSize)
@@ -140,10 +150,25 @@ proc loadFileFirstChunk*(filePath: string): tuple[lines: seq[string], bytesRead:
 
   return (lines: lines, bytesRead: int64(n), totalSize: totalSize, done: done, carry: carry)
 
+proc stopFileLoader*() =
+  ## Signal the background file loader to stop and drain the channel.
+  if not fileLoaderActive:
+    return
+  fileLoaderCancel.store(true)
+  while true:
+    let (hasData, chunk) = fileLoaderChannel.tryRecv()
+    if hasData and chunk.kind == fckDone:
+      break
+    elif not hasData:
+      os.sleep(1)
+  fileLoaderActive = false
+  fileLoaderCancel.store(false)
+
 proc startFileLoader*(filePath: string, startOffset: int64, carry: string) =
   ## Start the background file loader thread from given offset with initial carry
   fileLoaderChannel.open()
   fileLoaderPaused.store(false)
+  fileLoaderCancel.store(false)
   fileLoaderActive = true
   createThread(fileLoaderThread, fileLoaderWorker, (path: filePath, startOffset: startOffset, initialCarry: carry))
 
@@ -161,17 +186,6 @@ proc pauseFileLoader*() =
 
 proc resumeFileLoader*() =
   fileLoaderPaused.store(false)
-
-proc loadFile*(filePath: string): seq[string] =
-  if filePath.len == 0 or not fileExists(filePath):
-    return @[""]
-  let content = readFile(filePath)
-  if content.len == 0:
-    return @[""]
-  result = content.splitLines()
-  # Remove trailing empty line if file ends with newline
-  if result.len > 1 and result[^1].len == 0:
-    result.setLen(result.len - 1)
 
 proc saveFile*(filePath: string, lines: seq[string]) =
   var content = ""

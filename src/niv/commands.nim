@@ -7,6 +7,7 @@ import fileio
 import sidebar
 import lsp_manager
 import lsp_client
+import lsp_types
 import highlight
 
 type
@@ -76,27 +77,24 @@ proc executeCommand*(state: var EditorState, cmd: ExCommand, arg: string) =
 
   of ecEdit:
     if arg.len > 0:
-      # Close current document in LSP
-      sendDidClose()
-      clearSemanticTokens()
-      resetBgHighlight()
+      stopFileLoader()
+      resetViewportRangeCache()
       state.buffer = newBuffer(arg)
       state.cursor = Position(line: 0, col: 0)
       state.viewport.topLine = 0
       state.viewport.leftCol = 0
       state.statusMessage = "\"" & arg & "\""
-      # Open new file in LSP
-      if lspIsActive():
+      switchLsp(arg)
+      if lspState == lsRunning:
         let text = state.buffer.lines.join("\n")
-        lspDocumentUri = filePathToUri(arg)
         sendDidOpen(arg, text)
         lspSyncedLines = state.buffer.lineCount
         if tokenLegend.len > 0 and lspHasSemanticTokensRange:
           sendSemanticTokensRange(0, min(state.buffer.lineCount - 1, 50))
           startBgHighlight(state.buffer.lineCount)
-      else:
-        tryAutoStartLsp(arg)
     elif state.buffer.filePath.len > 0:
+      stopFileLoader()
+      resetViewportRangeCache()
       clearSemanticTokens()
       resetBgHighlight()
       state.buffer = newBuffer(state.buffer.filePath)
@@ -104,7 +102,6 @@ proc executeCommand*(state: var EditorState, cmd: ExCommand, arg: string) =
       state.viewport.topLine = 0
       state.viewport.leftCol = 0
       state.statusMessage = "\"" & state.buffer.filePath & "\" reloaded"
-      # Re-send didOpen for reloaded file
       if lspIsActive():
         let text = state.buffer.lines.join("\n")
         sendDidOpen(state.buffer.filePath, text)

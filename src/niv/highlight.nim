@@ -79,3 +79,6 @@ proc parseSemanticTokens*(data: seq[int], lineCount: int) =
 
 proc clearSemanticTokens*() =
   semanticLines = @[]
+
+proc clearTokenLegend*() =
+  tokenLegend = @[]

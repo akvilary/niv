@@ -7,14 +7,12 @@ import sidebar
 import lsp_client
 import lsp_types
 import highlight
+import fileio
 
 proc openFileFromSidebar(state: var EditorState, filePath: string) =
   ## Open a file from the sidebar with proper LSP integration
-  # Close old document in LSP
-  if lspState == lsRunning:
-    sendDidClose()
-  clearSemanticTokens()
-  resetBgHighlight()
+  stopFileLoader()
+  resetViewportRangeCache()
 
   state.buffer = newBuffer(filePath)
   state.cursor = Position(line: 0, col: 0)
@@ -24,17 +22,14 @@ proc openFileFromSidebar(state: var EditorState, filePath: string) =
   state.mode = mNormal
   state.statusMessage = "\"" & filePath & "\""
 
-  # Open in LSP + request semantic tokens
+  switchLsp(filePath)
   if lspState == lsRunning:
     let text = state.buffer.lines.join("\n")
-    lspDocumentUri = filePathToUri(filePath)
     sendDidOpen(filePath, text)
     lspSyncedLines = state.buffer.lineCount
     if tokenLegend.len > 0 and lspHasSemanticTokensRange:
       sendSemanticTokensRange(0, min(state.buffer.lineCount - 1, 50))
       startBgHighlight(state.buffer.lineCount)
-  elif lspState == lsOff:
-    tryAutoStartLsp(filePath)
 
 proc handleExploreMode*(state: var EditorState, key: InputKey) =
   state.statusMessage = ""

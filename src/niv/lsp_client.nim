@@ -26,8 +26,11 @@ var lspDocumentUri*: string = ""
 var lspServerCommand*: string = ""
 var currentDiagnostics*: seq[Diagnostic]
 var completionState*: CompletionState
+var lspHasSemanticTokens*: bool = false
 var lspHasSemanticTokensRange*: bool = false
 var lspSyncedLines*: int = 0
+var lastRangeTopLine*: int = -1
+var lastRangeEndLine*: int = -1
 
 # Background progressive highlighting state
 const BgHighlightChunkSize* = 1000
@@ -301,6 +304,10 @@ proc sendSemanticTokensRange*(startLine, endLine: int) =
     startLine, 0, endLine, 0))
   addPendingRequest(stId, "textDocument/semanticTokens/range")
 
+proc resetViewportRangeCache*() =
+  lastRangeTopLine = -1
+  lastRangeEndLine = -1
+
 proc startBgHighlight*(lineCount: int, fromLine: int = 0) =
   ## Start background progressive highlighting from fromLine to lineCount
   bgHighlightNextLine = fromLine
@@ -336,3 +343,86 @@ proc sendDidClose*() =
   if lspDocumentUri.len > 0:
     sendToLsp(buildDidClose(lspDocumentUri))
   lspSyncedLines = 0
+
+proc forceStopLsp*() =
+  ## Synchronously kill the LSP server and clean up all state.
+  ## Used when switching LSP servers (not for graceful editor exit).
+  if lspState == lsOff:
+    return
+  # Best-effort graceful shutdown
+  if lspState == lsRunning:
+    try:
+      let id = nextLspId()
+      sendToLsp(buildShutdown(id))
+      sendToLsp(buildExit())
+    except CatchableError:
+      discard
+  # Kill the process
+  try:
+    lspProcess.kill()
+    discard lspProcess.waitForExit(timeout = 500)
+    lspProcess.close()
+  except CatchableError:
+    discard
+  # Drain channel
+  while true:
+    let (hasEvent, _) = lspChannel.tryRecv()
+    if not hasEvent: break
+  # Reset ALL state
+  lspState = lsOff
+  lspNextId = 1
+  lspPendingRequests = @[]
+  lspDocumentUri = ""
+  lspDocumentVersion = 0
+  lspServerCommand = ""
+  lspSyncedLines = 0
+  activeLspLanguageId = ""
+  currentDiagnostics = @[]
+  completionState = CompletionState()
+  lspHasSemanticTokens = false
+  lspHasSemanticTokensRange = false
+  clearSemanticTokens()
+  clearTokenLegend()
+  resetBgHighlight()
+  resetViewportRangeCache()
+
+proc switchLsp*(filePath: string) =
+  ## Switch LSP server for a new file. Handles same-language and cross-language cases.
+  ## Same language: didClose old, didOpen new (keep tokenLegend).
+  ## Different language: forceStop old, start new (clear everything).
+  ## No server available: stop old, clear state.
+  let newServer = findServerForFile(filePath)
+  let newLangId = if newServer != nil: newServer.languageId else: ""
+  let sameLang = newLangId.len > 0 and newLangId == activeLspLanguageId
+
+  if sameLang and lspState == lsRunning:
+    # Same LSP server — just switch documents
+    sendDidClose()
+    clearSemanticTokens()
+    resetBgHighlight()
+    currentDiagnostics = @[]
+    completionState = CompletionState()
+    lspSyncedLines = 0
+    return
+
+  if sameLang and lspState == lsStarting:
+    # LSP still starting for same language — wait for initialize
+    clearSemanticTokens()
+    resetBgHighlight()
+    currentDiagnostics = @[]
+    lspSyncedLines = 0
+    return
+
+  # Different language or LSP not running — full switch
+  if lspState != lsOff:
+    forceStopLsp()
+
+  if newServer != nil:
+    let bin = findLspServer(newServer.command)
+    if bin.len > 0:
+      activeLspLanguageId = newServer.languageId
+      startLsp(bin, newServer.args, getCurrentDir())
+      return
+
+  # No server available for this file type
+  activeLspLanguageId = ""

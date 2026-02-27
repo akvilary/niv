@@ -19,10 +19,6 @@ import lsp_protocol
 import highlight
 import fileio
 
-var lspHasSemanticTokens*: bool = false
-var lastRangeTopLine: int = -1
-var lastRangeEndLine: int = -1
-
 proc newEditorState*(filePath: string = ""): EditorState =
   result.buffer = newBuffer(filePath)
   result.cursor = Position(line: 0, col: 0)
@@ -134,19 +130,18 @@ proc handleLspEvents(state: var EditorState): bool =
 
             # Open file if different
             if filePath != state.buffer.filePath:
-              sendDidClose()
-              clearSemanticTokens()
-              lastRangeTopLine = -1
-              lastRangeEndLine = -1
+              stopFileLoader()
+              resetViewportRangeCache()
               state.buffer = newBuffer(filePath)
-              let text = state.buffer.lines.join("\n")
-              lspDocumentUri = filePathToUri(filePath)
-              sendDidOpen(filePath, text)
-              lspSyncedLines = state.buffer.lineCount
-              # Request range tokens for viewport
-              if lspHasSemanticTokensRange and tokenLegend.len > 0:
-                requestViewportRangeTokens(state)
-                startBgHighlight(state.buffer.lineCount)
+              switchLsp(filePath)
+              # If same-language LSP is still running, send didOpen immediately
+              if lspState == lsRunning:
+                let text = state.buffer.lines.join("\n")
+                sendDidOpen(filePath, text)
+                lspSyncedLines = state.buffer.lineCount
+                if lspHasSemanticTokensRange and tokenLegend.len > 0:
+                  requestViewportRangeTokens(state)
+                  startBgHighlight(state.buffer.lineCount)
 
             state.cursor = Position(line: line, col: col)
             state.viewport.topLine = 0
@@ -254,6 +249,11 @@ proc handleFileLoaderEvents(state: var EditorState): bool =
         for line in chunk.lines:
           state.buffer.lines.add(line)
       state.buffer.loadedBytes += chunk.bytesRead
+      # Progressive LSP sync to viewport
+      if lspState == lsRunning and lspSyncedLines > 0:
+        let viewEnd = state.viewport.topLine + state.viewport.height
+        if state.buffer.lineCount > lspSyncedLines and lspSyncedLines < viewEnd:
+          syncLspToLine(state, min(state.buffer.lineCount, viewEnd + 100))
     of fckDone:
       state.buffer.fullyLoaded = true
       # Remove trailing empty line if file ends with newline
