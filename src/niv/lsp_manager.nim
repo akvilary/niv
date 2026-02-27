@@ -181,6 +181,16 @@ proc initLspManager*() =
       bundled: true,
       enabledByDefault: true,
     ),
+    LspServerInfo(
+      name: "niv_css_lsp",
+      command: "niv_css_lsp",
+      languages: @["css"],
+      extensions: @[".css"],
+      languageId: "css",
+      category: scLsp,
+      bundled: true,
+      enabledByDefault: true,
+    ),
   ]
   for i in 0..<lspMgr.servers.len:
     checkInstalled(lspMgr.servers[i])

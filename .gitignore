@@ -13,4 +13,6 @@
 /src/niv_yaml_lsp
 /src/niv_md_lsp
 /src/niv_bash_lsp
+/niv_css_lsp
+/src/niv_css_lsp
 test.txt
