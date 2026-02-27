@@ -16,6 +16,7 @@ type
     htProperty     # attribute names: class, id, href, src
     htOperator     # < > </ /> =
     htMacro        # HTML entities: &amp; &#123; &#xAB;
+    htVariable     # template placeholder content: {{ expr }}
 
   HtmlToken = object
     kind: HtmlTokenKind
@@ -36,6 +37,7 @@ const
   stProperty = 4
   stOperator = 5
   stMacro = 6
+  stVariable = 7
 
 # ---------------------------------------------------------------------------
 # HTML Tokenizer
@@ -111,6 +113,80 @@ proc tokenizeHtml(text: string): seq[HtmlToken] =
         if col > 0:
           tokens.add(HtmlToken(kind: htComment, line: line, col: 0,
                                 length: col))
+      continue
+
+    # Template placeholder {{ ... }}
+    if c == '{' and peek(1) == '{':
+      let sCol = col
+      let sLine = line
+      advance(); advance() # skip {{
+      tokens.add(HtmlToken(kind: htMacro, line: sLine, col: sCol, length: 2))
+      # Skip whitespace
+      while pos < text.len and text[pos] in {' ', '\t'}:
+        advance()
+      # Content
+      let contentCol = col
+      let contentLine = line
+      let contentStart = pos
+      while pos < text.len:
+        if text[pos] == '}' and peek(1) == '}':
+          break
+        if text[pos] == '\n':
+          break
+        advance()
+      let contentLen = pos - contentStart
+      # Trim trailing whitespace from content
+      var trimLen = contentLen
+      while trimLen > 0 and text[contentStart + trimLen - 1] in {' ', '\t'}:
+        dec trimLen
+      if trimLen > 0:
+        tokens.add(HtmlToken(kind: htVariable, line: contentLine, col: contentCol,
+                              length: trimLen))
+      # Skip whitespace before }}
+      while pos < text.len and text[pos] in {' ', '\t'}:
+        advance()
+      # Closing }}
+      if pos < text.len and text[pos] == '}' and peek(1) == '}':
+        let closeCol = col
+        advance(); advance()
+        tokens.add(HtmlToken(kind: htMacro, line: line, col: closeCol, length: 2))
+      continue
+
+    # Template tag {% ... %}
+    if c == '{' and peek(1) == '%':
+      let sCol = col
+      let sLine = line
+      advance(); advance() # skip {%
+      tokens.add(HtmlToken(kind: htMacro, line: sLine, col: sCol, length: 2))
+      # Skip whitespace
+      while pos < text.len and text[pos] in {' ', '\t'}:
+        advance()
+      # Content
+      let contentCol = col
+      let contentLine = line
+      let contentStart = pos
+      while pos < text.len:
+        if text[pos] == '%' and peek(1) == '}':
+          break
+        if text[pos] == '\n':
+          break
+        advance()
+      let contentLen = pos - contentStart
+      # Trim trailing whitespace from content
+      var trimLen = contentLen
+      while trimLen > 0 and text[contentStart + trimLen - 1] in {' ', '\t'}:
+        dec trimLen
+      if trimLen > 0:
+        tokens.add(HtmlToken(kind: htVariable, line: contentLine, col: contentCol,
+                              length: trimLen))
+      # Skip whitespace before %}
+      while pos < text.len and text[pos] in {' ', '\t'}:
+        advance()
+      # Closing %}
+      if pos < text.len and text[pos] == '%' and peek(1) == '}':
+        let closeCol = col
+        advance(); advance()
+        tokens.add(HtmlToken(kind: htMacro, line: line, col: closeCol, length: 2))
       continue
 
     # DOCTYPE: <!DOCTYPE ...>
@@ -216,18 +292,66 @@ proc tokenizeHtml(text: string): seq[HtmlToken] =
             # Attribute value
             if pos < text.len and text[pos] in {'"', '\''}:
               let q = text[pos]
-              let valCol = col
-              let valLine = line
+              let openCol = col
               advance() # skip opening quote
+              # Emit opening quote as string
+              tokens.add(HtmlToken(kind: htString, line: line, col: openCol, length: 1))
+              # Scan content, splitting on {{ }} and {% %}
+              var segCol = col
+              var segLine = line
               while pos < text.len and text[pos] != q:
-                if text[pos] == '\n':
-                  advance()
+                if text[pos] == '{' and (peek(1) == '{' or peek(1) == '%'):
+                  let isPercent = peek(1) == '%'
+                  let closeChar = if isPercent: '%' else: '}'
+                  # Emit string segment before delimiter
+                  if col > segCol or line > segLine:
+                    if segLine == line:
+                      tokens.add(HtmlToken(kind: htString, line: segLine, col: segCol,
+                                            length: col - segCol))
+                  # Emit {{ or {%
+                  let brCol = col
+                  advance(); advance()
+                  tokens.add(HtmlToken(kind: htMacro, line: line, col: brCol, length: 2))
+                  # Skip whitespace
+                  while pos < text.len and text[pos] in {' ', '\t'}:
+                    advance()
+                  # Content
+                  let cCol = col
+                  let cLine = line
+                  let cStart = pos
+                  while pos < text.len and text[pos] != q:
+                    if text[pos] == closeChar and peek(1) == '}':
+                      break
+                    if text[pos] == '\n': break
+                    advance()
+                  var trimLen = pos - cStart
+                  while trimLen > 0 and text[cStart + trimLen - 1] in {' ', '\t'}:
+                    dec trimLen
+                  if trimLen > 0:
+                    tokens.add(HtmlToken(kind: htVariable, line: cLine, col: cCol,
+                                          length: trimLen))
+                  # Skip whitespace before }} or %}
+                  while pos < text.len and text[pos] in {' ', '\t'}:
+                    advance()
+                  # Emit }} or %}
+                  if pos < text.len and text[pos] == closeChar and peek(1) == '}':
+                    let clCol = col
+                    advance(); advance()
+                    tokens.add(HtmlToken(kind: htMacro, line: line, col: clCol, length: 2))
+                  segCol = col
+                  segLine = line
                 else:
                   advance()
-              if pos < text.len: advance() # skip closing quote
-              if valLine == line:
-                tokens.add(HtmlToken(kind: htString, line: valLine, col: valCol,
-                                      length: col - valCol))
+              # Emit remaining string segment
+              if col > segCol or line > segLine:
+                if segLine == line:
+                  tokens.add(HtmlToken(kind: htString, line: segLine, col: segCol,
+                                        length: col - segCol))
+              # Emit closing quote
+              if pos < text.len and text[pos] == q:
+                let clqCol = col
+                advance()
+                tokens.add(HtmlToken(kind: htString, line: line, col: clqCol, length: 1))
             elif pos < text.len and text[pos] notin {' ', '\t', '\n', '\r', '>', '/'}:
               # Unquoted attribute value
               let valCol = col
@@ -312,6 +436,7 @@ proc encodeSemanticTokens(tokens: seq[HtmlToken]): seq[int] =
       of htProperty: stProperty
       of htOperator: stOperator
       of htMacro: stMacro
+      of htVariable: stVariable
     result.add(deltaLine)
     result.add(deltaCol)
     result.add(tok.length)
@@ -389,7 +514,8 @@ proc main() =
           "semanticTokensProvider": {
             "legend": {
               "tokenTypes": ["keyword", "string", "comment",
-                             "type", "property", "operator", "macro"],
+                             "type", "property", "operator", "macro",
+                             "variable"],
               "tokenModifiers": []
             },
             "full": true,
