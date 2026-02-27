@@ -253,15 +253,19 @@ proc findLspServer*(command: string): string =
     return inPath
   return ""
 
+var activeLspLanguageId*: string = ""
+
 proc tryAutoStartLsp*(filePath: string) =
-  ## Auto-start nimlangserver if opening a .nim file
+  ## Auto-start the appropriate LSP server based on file extension
   if lspState != lsOff:
     return
-  if not filePath.endsWith(".nim"):
+  let server = findServerForFile(filePath)
+  if server == nil:
     return
-  let bin = findLspServer("nimlangserver")
+  let bin = findLspServer(server.command)
   if bin.len == 0:
     return
+  activeLspLanguageId = server.languageId
   startLsp(bin, getCurrentDir())
 
 proc sendDidOpen*(filePath: string, text: string) =
@@ -269,7 +273,7 @@ proc sendDidOpen*(filePath: string, text: string) =
     return
   lspDocumentVersion = 1
   lspDocumentUri = filePathToUri(filePath)
-  let languageId = if filePath.endsWith(".nim"): "nim" else: "text"
+  let languageId = if activeLspLanguageId.len > 0: activeLspLanguageId else: "text"
   sendToLsp(buildDidOpen(lspDocumentUri, languageId, lspDocumentVersion, text))
 
 proc sendDidChange*(text: string) =

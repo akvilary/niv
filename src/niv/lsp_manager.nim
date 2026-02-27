@@ -7,6 +7,7 @@ const
   nivConfigDir* = ".config" / "niv"
   nivLspDir* = nivConfigDir / "lsp"
   nivLspBinDir* = nivLspDir / "bin"
+  nivLspDisabledDir* = nivLspDir / "disabled"
 
 type
   LspServerCategory* = enum
@@ -21,8 +22,11 @@ type
     installCmd*: string    ## Shell command to install
     uninstallCmd*: string  ## Shell command to uninstall
     languages*: seq[string]
+    extensions*: seq[string]  ## File extensions (e.g. @[".json"])
+    languageId*: string       ## LSP language identifier
     category*: LspServerCategory
     installed*: bool
+    bundled*: bool         ## Bundled with niv (no install/uninstall subprocess)
 
   LspManagerState* = object
     visible*: bool
@@ -51,28 +55,73 @@ proc serverBinPath*(command: string): string =
   ## Returns the full path to a server binary in the managed directory
   lspBinDir() / command
 
+proc lspDisabledDir*(): string =
+  ## Returns the full path to ~/.config/niv/lsp/disabled
+  getHomeDir() / nivLspDisabledDir
+
 proc ensureLspDirs*() =
-  ## Create ~/.config/niv/lsp/bin if it doesn't exist
+  ## Create ~/.config/niv/lsp/bin and disabled dirs if they don't exist
   createDir(lspBinDir())
+  createDir(lspDisabledDir())
+
+proc isServerDisabled*(name: string): bool =
+  fileExists(lspDisabledDir() / name)
+
+proc disableServer*(name: string) =
+  ensureLspDirs()
+  writeFile(lspDisabledDir() / name, "")
+
+proc enableServer*(name: string) =
+  let path = lspDisabledDir() / name
+  if fileExists(path):
+    removeFile(path)
 
 proc checkInstalled(server: var LspServerInfo) =
-  server.installed = fileExists(serverBinPath(server.command))
+  if server.bundled:
+    server.installed = findExe(server.command).len > 0 and
+                       not isServerDisabled(server.name)
+  else:
+    server.installed = fileExists(serverBinPath(server.command))
 
 proc initLspManager*() =
   ensureLspDirs()
   let base = lspBaseDir()
   lspMgr.servers = @[
     LspServerInfo(
+      name: "niv_json_lsp",
+      command: "niv_json_lsp",
+      languages: @["json"],
+      extensions: @[".json"],
+      languageId: "json",
+      category: scLsp,
+      bundled: true,
+    ),
+    LspServerInfo(
       name: "nimlangserver",
       command: "nimlangserver",
       installCmd: "nimble install nimlangserver -y --nimbleDir:" & base,
       uninstallCmd: "nimble uninstall nimlangserver -y --nimbleDir:" & base,
       languages: @["nim"],
+      extensions: @[".nim", ".nims"],
+      languageId: "nim",
       category: scLsp,
     ),
   ]
   for i in 0..<lspMgr.servers.len:
     checkInstalled(lspMgr.servers[i])
+
+proc findServerForFile*(filePath: string): ptr LspServerInfo =
+  ## Find an installed server that handles the given file extension
+  let ext = if '.' in filePath: "." & filePath.rsplit('.', maxsplit = 1)[^1]
+            else: ""
+  if ext.len == 0:
+    return nil
+  for i in 0..<lspMgr.servers.len:
+    if lspMgr.servers[i].installed:
+      for e in lspMgr.servers[i].extensions:
+        if e == ext:
+          return addr lspMgr.servers[i]
+  return nil
 
 proc openLspManager*() =
   for i in 0..<lspMgr.servers.len:
@@ -133,6 +182,16 @@ proc startInstall*() =
     lspMgr.statusMessage = server.name & " is already installed"
     return
 
+  # Bundled servers: just enable (remove disabled marker)
+  if server.bundled:
+    enableServer(server.name)
+    checkInstalled(lspMgr.servers[lspMgr.cursorIndex])
+    if lspMgr.servers[lspMgr.cursorIndex].installed:
+      lspMgr.statusMessage = server.name & " enabled"
+    else:
+      lspMgr.statusMessage = server.name & " not found in PATH"
+    return
+
   ensureLspDirs()
 
   try:
@@ -158,6 +217,13 @@ proc startUninstall*() =
   let server = lspMgr.servers[lspMgr.cursorIndex]
   if not server.installed:
     lspMgr.statusMessage = server.name & " is not installed"
+    return
+
+  # Bundled servers: just disable (create disabled marker)
+  if server.bundled:
+    disableServer(server.name)
+    checkInstalled(lspMgr.servers[lspMgr.cursorIndex])
+    lspMgr.statusMessage = server.name & " disabled"
     return
 
   try:

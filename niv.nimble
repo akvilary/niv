@@ -4,7 +4,7 @@ author        = "akvilary"
 description   = "A Vim-like terminal text editor"
 license       = "MIT"
 srcDir        = "src"
-bin           = @["niv"]
+bin           = @["niv", "niv_json_lsp"]
 
 # Dependencies
 requires "nim >= 2.2.0"
