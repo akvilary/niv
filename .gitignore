@@ -3,8 +3,10 @@
 /niv_python_lsp
 /niv_nim_lsp
 /niv_toml_lsp
+/niv_yaml_lsp
 /src/niv_json_lsp
 /src/niv_python_lsp
 /src/niv_nim_lsp
 /src/niv_toml_lsp
+/src/niv_yaml_lsp
 test.txt

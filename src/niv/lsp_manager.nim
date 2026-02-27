@@ -151,6 +151,16 @@ proc initLspManager*() =
       bundled: true,
       enabledByDefault: true,
     ),
+    LspServerInfo(
+      name: "niv_yaml_lsp",
+      command: "niv_yaml_lsp",
+      languages: @["yaml"],
+      extensions: @[".yaml", ".yml"],
+      languageId: "yaml",
+      category: scLsp,
+      bundled: true,
+      enabledByDefault: true,
+    ),
   ]
   for i in 0..<lspMgr.servers.len:
     checkInstalled(lspMgr.servers[i])
