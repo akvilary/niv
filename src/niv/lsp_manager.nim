@@ -141,6 +141,16 @@ proc initLspManager*() =
       bundled: true,
       enabledByDefault: true,
     ),
+    LspServerInfo(
+      name: "niv_toml_lsp",
+      command: "niv_toml_lsp",
+      languages: @["toml"],
+      extensions: @[".toml"],
+      languageId: "toml",
+      category: scLsp,
+      bundled: true,
+      enabledByDefault: true,
+    ),
   ]
   for i in 0..<lspMgr.servers.len:
     checkInstalled(lspMgr.servers[i])

@@ -8,7 +8,7 @@ type
     cursor*: Position
     topLine*: int
 
-const MaxJumpStack = 100
+const MaxJumpStack = 50
 
 var jumpStack*: seq[JumpLocation]
 
