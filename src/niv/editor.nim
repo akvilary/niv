@@ -20,8 +20,11 @@ import lsp_types
 import lsp_protocol
 import highlight
 import ts_highlight
+import fileio
 
 var lspHasSemanticTokens*: bool = false
+var lastRangeTopLine: int = -1
+var lastRangeEndLine: int = -1
 
 proc newEditorState*(filePath: string = ""): EditorState =
   result.buffer = newBuffer(filePath)
@@ -38,6 +41,30 @@ proc newEditorState*(filePath: string = ""): EditorState =
   if filePath.len > 0 and not lspHasSemanticTokens:
     let text = result.buffer.lines.join("\n")
     tryTsHighlight(filePath, text, result.buffer.lineCount)
+
+proc syncLspToLine(state: EditorState, targetLine: int) =
+  ## Lazy sync: ensure LSP has text at least up to targetLine
+  if targetLine <= lspSyncedLines or lspState != lsRunning:
+    return
+  let syncTo = min(targetLine, state.buffer.lineCount)
+  if syncTo <= lspSyncedLines:
+    return
+  let text = state.buffer.lines[0..<syncTo].join("\n")
+  sendDidChange(text)
+  lspSyncedLines = syncTo
+
+proc requestViewportRangeTokens(state: EditorState) =
+  ## Request range tokens for the current viewport if server supports it
+  if not lspHasSemanticTokensRange or lspState != lsRunning or tokenLegend.len == 0:
+    return
+  let endLine = min(state.viewport.topLine + state.viewport.height,
+                    state.buffer.lineCount) - 1
+  let startLine = state.viewport.topLine
+  if startLine == lastRangeTopLine and endLine == lastRangeEndLine:
+    return  # Already requested this exact range
+  lastRangeTopLine = startLine
+  lastRangeEndLine = endLine
+  sendSemanticTokensRange(startLine, max(0, endLine))
 
 proc handleLspEvents(state: var EditorState): bool =
   ## Poll and process all pending LSP events (non-blocking)
@@ -62,6 +89,9 @@ proc handleLspEvents(state: var EditorState): bool =
             if serverCaps.hasKey("semanticTokensProvider"):
               lspHasSemanticTokens = true
               let stp = serverCaps["semanticTokensProvider"]
+              # Check if server supports range requests
+              lspHasSemanticTokensRange = stp.hasKey("range") and
+                stp["range"].kind == JBool and stp["range"].getBool()
               if stp.hasKey("legend") and stp["legend"].hasKey("tokenTypes"):
                 var legend: seq[string]
                 for t in stp["legend"]["tokenTypes"]:
@@ -76,11 +106,12 @@ proc handleLspEvents(state: var EditorState): bool =
         if state.buffer.filePath.len > 0:
           let text = state.buffer.lines.join("\n")
           sendDidOpen(state.buffer.filePath, text)
-          # Request semantic tokens
+          lspSyncedLines = state.buffer.lineCount
+          # Request range tokens for viewport
+          if lspHasSemanticTokensRange and tokenLegend.len > 0:
+            requestViewportRangeTokens(state)
+            startBgHighlight(state.buffer.lineCount)
           if tokenLegend.len > 0:
-            let stId = nextLspId()
-            sendToLsp(buildSemanticTokensFull(stId, lspDocumentUri))
-            addPendingRequest(stId, "textDocument/semanticTokens/full")
             state.statusMessage = "LSP ready (semantic tokens: " & $tokenLegend.len & " types)"
           else:
             state.statusMessage = "LSP ready (no semantic tokens support)"
@@ -110,15 +141,17 @@ proc handleLspEvents(state: var EditorState): bool =
             if filePath != state.buffer.filePath:
               sendDidClose()
               clearSemanticTokens()
+              lastRangeTopLine = -1
+              lastRangeEndLine = -1
               state.buffer = newBuffer(filePath)
               lspDocumentUri = filePathToUri(filePath)
               let text = state.buffer.lines.join("\n")
               sendDidOpen(filePath, text)
-              # Request semantic tokens for new file
-              if tokenLegend.len > 0:
-                let stId = nextLspId()
-                sendToLsp(buildSemanticTokensFull(stId, lspDocumentUri))
-                addPendingRequest(stId, "textDocument/semanticTokens/full")
+              lspSyncedLines = state.buffer.lineCount
+              # Request range tokens for viewport
+              if lspHasSemanticTokensRange and tokenLegend.len > 0:
+                requestViewportRangeTokens(state)
+                startBgHighlight(state.buffer.lineCount)
 
             state.cursor = Position(line: line, col: col)
             state.viewport.topLine = 0
@@ -128,16 +161,50 @@ proc handleLspEvents(state: var EditorState): bool =
             state.statusMessage = "Definition not found"
         except JsonParsingError:
           state.statusMessage = "LSP: invalid definition response"
-      of "textDocument/semanticTokens/full":
+      of "textDocument/semanticTokens/range":
         try:
           let resultNode = parseJson(event.responseJson)
           if resultNode.hasKey("data"):
             var data: seq[int]
             for v in resultNode["data"]:
               data.add(v.getInt())
-            parseSemanticTokens(data, state.buffer.lineCount)
+            # Merge range tokens into existing semantic lines
+            # Grow semanticLines if needed
+            if semanticLines.len < state.buffer.lineCount:
+              semanticLines.setLen(state.buffer.lineCount)
+            # Parse range tokens — they use absolute line positions
+            var currentLine = 0
+            var currentCol = 0
+            var i = 0
+            while i + 4 < data.len:
+              let deltaLine = data[i]
+              let deltaStart = data[i + 1]
+              let length = data[i + 2]
+              let tokenType = data[i + 3]
+              i += 5
+              if deltaLine > 0:
+                currentLine += deltaLine
+                currentCol = deltaStart
+              else:
+                currentCol += deltaStart
+              if currentLine < semanticLines.len:
+                # Check if token already exists to avoid duplicates
+                var found = false
+                for tok in semanticLines[currentLine]:
+                  if tok.col == currentCol and tok.length == length:
+                    found = true
+                    break
+                if not found:
+                  semanticLines[currentLine].add(SemanticToken(
+                    col: currentCol,
+                    length: length,
+                    tokenType: tokenType,
+                  ))
         except JsonParsingError:
           discard
+        if event.requestId == bgHighlightRequestId:
+          bgHighlightRequestId = -1
+        trySendBgHighlight()
       of "textDocument/completion":
         try:
           let resultNode = parseJson(event.responseJson)
@@ -164,7 +231,7 @@ proc handleLspEvents(state: var EditorState): bool =
       else:
         discard
     of lekDiagnostics:
-      if event.diagUri == lspDocumentUri:
+      if state.buffer.fullyLoaded and event.diagUri == lspDocumentUri:
         currentDiagnostics = event.diagnostics
     of lekError:
       state.statusMessage = "LSP: " & event.errorMessage
@@ -172,6 +239,35 @@ proc handleLspEvents(state: var EditorState): bool =
       lspState = lsOff
       currentDiagnostics = @[]
       clearSemanticTokens()
+      resetBgHighlight()
+      lspSyncedLines = 0
+
+proc handleFileLoaderEvents(state: var EditorState): bool =
+  ## Poll and process file loader chunks. Returns true if lines were added.
+  result = false
+  if state.buffer.fullyLoaded:
+    return
+
+  while true:
+    let (hasData, chunk) = pollFileLoader()
+    if not hasData:
+      break
+    result = true
+    case chunk.kind
+    of fckLines:
+      if chunk.lines.len > 0:
+        for line in chunk.lines:
+          state.buffer.lines.add(line)
+      state.buffer.loadedBytes += chunk.bytesRead
+    of fckDone:
+      state.buffer.fullyLoaded = true
+      # Remove trailing empty line if file ends with newline
+      if state.buffer.lines.len > 1 and state.buffer.lines[^1].len == 0:
+        state.buffer.lines.setLen(state.buffer.lines.len - 1)
+      # Refresh viewport highlights
+      if lspHasSemanticTokensRange and lspState == lsRunning and tokenLegend.len > 0:
+        lastRangeTopLine = -1
+        requestViewportRangeTokens(state)
 
 proc run*(state: var EditorState) =
   enableRawMode()
@@ -181,6 +277,8 @@ proc run*(state: var EditorState) =
     disableRawMode()
 
   var needsRedraw = true
+  var prevMode = state.mode
+  var prevTopLine = -1
 
   while state.running:
     # Update viewport dimensions
@@ -195,15 +293,33 @@ proc run*(state: var EditorState) =
     # Adjust viewport to keep cursor visible
     adjustViewport(state.viewport, state.cursor, state.buffer.lineCount)
 
+    # Request range tokens when viewport scrolls
+    if lspHasSemanticTokensRange and lspState == lsRunning and
+       tokenLegend.len > 0 and state.viewport.topLine != prevTopLine:
+      # Lazy sync: ensure LSP has text for the viewport area
+      let viewportEnd = min(state.viewport.topLine + state.viewport.height,
+                            state.buffer.lineCount)
+      syncLspToLine(state, viewportEnd)
+      requestViewportRangeTokens(state)
+      prevTopLine = state.viewport.topLine
+
     # Render only when something changed
     if needsRedraw:
       render(state)
       needsRedraw = false
 
+    # Poll file loader events (non-blocking)
+    let hadFileEvents = handleFileLoaderEvents(state)
+    if hadFileEvents:
+      needsRedraw = true
+
     # Poll LSP events (non-blocking)
     let hadLspEvents = handleLspEvents(state)
     if hadLspEvents:
       needsRedraw = true
+
+    # Continue background progressive highlighting
+    trySendBgHighlight()
 
     # Poll install/uninstall progress
     let lspProgress = pollInstallProgress()
@@ -232,3 +348,11 @@ proc run*(state: var EditorState) =
       handleLspManagerMode(state, key)
     of mTsManager:
       handleTsManagerMode(state, key)
+
+    # Pause/resume file loader on insert mode transitions
+    if state.mode != prevMode:
+      if state.mode == mInsert and not state.buffer.fullyLoaded:
+        pauseFileLoader()
+      elif prevMode == mInsert and not state.buffer.fullyLoaded:
+        resumeFileLoader()
+      prevMode = state.mode

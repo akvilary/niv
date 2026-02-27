@@ -59,11 +59,10 @@ proc handleInsertMode*(state: var EditorState, key: InputKey) =
     # Notify LSP of buffer changes
     if lspIsActive() and state.buffer.filePath.len > 0:
       sendDidChange(state.buffer.lines.join("\n"))
-      # Re-request semantic tokens
-      if tokenLegend.len > 0:
-        let stId = nextLspId()
-        sendToLsp(buildSemanticTokensFull(stId, lspDocumentUri))
-        addPendingRequest(stId, "textDocument/semanticTokens/full")
+      if tokenLegend.len > 0 and lspHasSemanticTokensRange:
+        sendSemanticTokensRange(state.viewport.topLine,
+          min(state.viewport.topLine + state.viewport.height - 1,
+              state.buffer.lineCount - 1))
     # Re-highlight with tree-sitter (if active)
     if tsState.active and state.buffer.filePath.len > 0:
       tsParseAndHighlight(state.buffer.lines.join("\n"), state.buffer.lineCount)

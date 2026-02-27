@@ -169,7 +169,9 @@ proc handleNormalMode*(state: var EditorState, key: InputKey) =
     state.cursor = clampCursor(state.buffer, pos, mNormal)
 
   of akGotoDefinition:
-    if lspState == lsRunning and lspDocumentUri.len > 0:
+    if not state.buffer.fullyLoaded:
+      state.statusMessage = "File still loading..."
+    elif lspState == lsRunning and lspDocumentUri.len > 0:
       let id = nextLspId()
       sendToLsp(buildDefinition(id, lspDocumentUri, state.cursor.line, state.cursor.col))
       addPendingRequest(id, "textDocument/definition")

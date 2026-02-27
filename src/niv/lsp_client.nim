@@ -9,6 +9,7 @@ import std/[json, osproc, streams, strutils, os, posix]
 import lsp_types
 import lsp_protocol
 import lsp_manager
+import highlight
 
 # ---------------------------------------------------------------------------
 # Global state (main thread owns client, worker thread only reads outputFd)
@@ -25,6 +26,14 @@ var lspDocumentUri*: string = ""
 var lspServerCommand*: string = ""
 var currentDiagnostics*: seq[Diagnostic]
 var completionState*: CompletionState
+var lspHasSemanticTokensRange*: bool = false
+var lspSyncedLines*: int = 0
+
+# Background progressive highlighting state
+const BgHighlightChunkSize* = 1000
+var bgHighlightNextLine*: int = -1
+var bgHighlightTotalLines*: int = 0
+var bgHighlightRequestId*: int = -1
 
 # ---------------------------------------------------------------------------
 # POSIX I/O helpers for worker thread (no GC-managed Stream objects)
@@ -282,8 +291,47 @@ proc sendDidChange*(text: string) =
   inc lspDocumentVersion
   sendToLsp(buildDidChange(lspDocumentUri, lspDocumentVersion, text))
 
+proc sendSemanticTokensRange*(startLine, endLine: int) =
+  ## Request semantic tokens for a specific line range
+  if not lspHasSemanticTokensRange or lspState != lsRunning or tokenLegend.len == 0:
+    return
+  let stId = nextLspId()
+  sendToLsp(buildSemanticTokensRange(stId, lspDocumentUri,
+    startLine, 0, endLine, 0))
+  addPendingRequest(stId, "textDocument/semanticTokens/range")
+
+proc startBgHighlight*(lineCount: int, fromLine: int = 0) =
+  ## Start background progressive highlighting from fromLine to lineCount
+  bgHighlightNextLine = fromLine
+  bgHighlightTotalLines = lineCount
+
+proc resetBgHighlight*() =
+  bgHighlightNextLine = -1
+  bgHighlightTotalLines = 0
+  bgHighlightRequestId = -1
+
+proc trySendBgHighlight*() =
+  ## Send the next background highlight chunk if conditions are met
+  if bgHighlightRequestId >= 0:
+    return  # Background request still in flight
+  if bgHighlightNextLine < 0 or bgHighlightNextLine >= bgHighlightTotalLines:
+    bgHighlightNextLine = -1
+    return
+  if not lspHasSemanticTokensRange or lspState != lsRunning or tokenLegend.len == 0:
+    return
+  let endLine = min(bgHighlightNextLine + BgHighlightChunkSize - 1, bgHighlightTotalLines - 1)
+  let stId = nextLspId()
+  sendToLsp(buildSemanticTokensRange(stId, lspDocumentUri,
+    bgHighlightNextLine, 0, endLine, 0))
+  addPendingRequest(stId, "textDocument/semanticTokens/range")
+  bgHighlightRequestId = stId
+  bgHighlightNextLine = endLine + 1
+  if bgHighlightNextLine >= bgHighlightTotalLines:
+    bgHighlightNextLine = -1
+
 proc sendDidClose*() =
   if lspState != lsRunning:
     return
   if lspDocumentUri.len > 0:
     sendToLsp(buildDidClose(lspDocumentUri))
+  lspSyncedLines = 0

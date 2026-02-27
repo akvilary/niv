@@ -27,7 +27,7 @@ proc buildInitialize*(id: int, processId: int, rootUri: string): JsonNode =
           },
           "definition": {},
           "semanticTokens": {
-            "requests": {"full": true},
+            "requests": {"full": true, "range": true},
             "tokenTypes": [
               "namespace", "type", "class", "enum", "interface",
               "struct", "typeParameter", "parameter", "variable",
@@ -54,6 +54,21 @@ proc buildSemanticTokensFull*(id: int, uri: string): JsonNode =
     "method": "textDocument/semanticTokens/full",
     "params": {
       "textDocument": {"uri": uri}
+    }
+  }
+
+proc buildSemanticTokensRange*(id: int, uri: string,
+                                startLine, startCol, endLine, endCol: int): JsonNode =
+  %*{
+    "jsonrpc": "2.0",
+    "id": id,
+    "method": "textDocument/semanticTokens/range",
+    "params": {
+      "textDocument": {"uri": uri},
+      "range": {
+        "start": {"line": startLine, "character": startCol},
+        "end": {"line": endLine, "character": endCol}
+      }
     }
   }
 

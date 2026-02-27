@@ -6,8 +6,21 @@ import fileio
 
 proc newBuffer*(filePath: string = ""): Buffer =
   result.filePath = filePath
-  result.lines = loadFile(filePath)
+  if filePath.len == 0:
+    result.lines = @[""]
+    result.fullyLoaded = true
+    result.modified = false
+    return
+
+  let (lines, bytesRead, totalSize, done, carry) = loadFileFirstChunk(filePath)
+  result.lines = lines
+  result.totalSize = totalSize
+  result.loadedBytes = bytesRead
+  result.fullyLoaded = done
   result.modified = false
+
+  if not done:
+    startFileLoader(filePath, bytesRead, carry)
 
 proc lineCount*(buf: Buffer): int =
   buf.lines.len

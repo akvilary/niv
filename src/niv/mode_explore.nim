@@ -6,7 +6,6 @@ import buffer
 import sidebar
 import lsp_client
 import lsp_types
-import lsp_protocol
 import highlight
 import ts_highlight
 
@@ -16,6 +15,7 @@ proc openFileFromSidebar(state: var EditorState, filePath: string) =
   if lspState == lsRunning:
     sendDidClose()
   clearSemanticTokens()
+  resetBgHighlight()
 
   state.buffer = newBuffer(filePath)
   state.cursor = Position(line: 0, col: 0)
@@ -30,15 +30,15 @@ proc openFileFromSidebar(state: var EditorState, filePath: string) =
     let text = state.buffer.lines.join("\n")
     lspDocumentUri = filePathToUri(filePath)
     sendDidOpen(filePath, text)
-    if tokenLegend.len > 0:
-      let stId = nextLspId()
-      sendToLsp(buildSemanticTokensFull(stId, lspDocumentUri))
-      addPendingRequest(stId, "textDocument/semanticTokens/full")
+    lspSyncedLines = state.buffer.lineCount
+    if tokenLegend.len > 0 and lspHasSemanticTokensRange:
+      sendSemanticTokensRange(0, min(state.buffer.lineCount - 1, 50))
+      startBgHighlight(state.buffer.lineCount)
   elif lspState == lsOff:
     tryAutoStartLsp(filePath)
 
   # Tree-sitter highlighting (if no LSP semantic tokens)
-  if tokenLegend.len == 0:
+  if tokenLegend.len == 0 and state.buffer.fullyLoaded:
     let text = state.buffer.lines.join("\n")
     tryTsHighlight(filePath, text, state.buffer.lineCount)
 

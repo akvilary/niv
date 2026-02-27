@@ -64,6 +64,9 @@ type
     filePath*: string
     modified*: bool
     undo*: UndoHistory
+    fullyLoaded*: bool       ## Whole file loaded?
+    totalSize*: int64        ## File size in bytes
+    loadedBytes*: int64      ## Bytes loaded so far
 
   Viewport* = object
     topLine*: int

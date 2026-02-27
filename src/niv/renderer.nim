@@ -355,7 +355,12 @@ proc render*(state: EditorState) =
 
   let modFlag = if state.buffer.modified: " [+]" else: ""
   let lspIndicator = if lspIsActive(): " [LSP]" else: ""
-  let leftPart = modeStr & " " & filename & modFlag & lspIndicator
+  let loadingIndicator = if not state.buffer.fullyLoaded and state.buffer.totalSize > 0:
+    let pct = int(state.buffer.loadedBytes * 100 div state.buffer.totalSize)
+    " [Loading " & $pct & "%]"
+  else:
+    ""
+  let leftPart = modeStr & " " & filename & modFlag & lspIndicator & loadingIndicator
 
   # Diagnostic counts for status bar
   var errCount, warnCount = 0

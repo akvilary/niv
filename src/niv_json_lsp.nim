@@ -281,6 +281,151 @@ proc encodeSemanticTokens(tokens: seq[JsonToken]): seq[int] =
     prevCol = tok.col
 
 # ---------------------------------------------------------------------------
+# Inside-out Range Tokenizer (no full-context stack needed)
+# ---------------------------------------------------------------------------
+
+proc tokenizeJsonRange(text: string, startLine, endLine: int): seq[JsonToken] =
+  ## Tokenize only lines [startLine..endLine] using local context.
+  ## For JSON, token types can be determined by nearby characters:
+  ##   - string followed by ':' → property, otherwise → string value
+  ##   - numbers, true/false/null are self-describing
+  result = @[]
+  var pos = 0
+  var line = 0
+  var col = 0
+
+  template ch(): char =
+    if pos < text.len: text[pos] else: '\0'
+
+  template advance() =
+    if pos < text.len:
+      if text[pos] == '\n':
+        inc line
+        col = 0
+      else:
+        inc col
+      inc pos
+
+  template skipWhitespace() =
+    while pos < text.len and text[pos] in {' ', '\t', '\r', '\n'}:
+      advance()
+
+  # Skip to startLine
+  while pos < text.len and line < startLine:
+    if text[pos] == '\n':
+      inc line
+      col = 0
+    else:
+      inc col
+    inc pos
+
+  while pos < text.len and line <= endLine:
+    skipWhitespace()
+    if pos >= text.len or line > endLine:
+      break
+
+    let c = ch()
+    case c
+    of '"':
+      let sLine = line
+      let sCol = col
+      advance()  # skip opening "
+      var length = 1
+      while pos < text.len:
+        let sc = text[pos]
+        if sc == '\\':
+          advance()
+          inc length
+          if pos < text.len:
+            advance()
+            inc length
+        elif sc == '"':
+          advance()
+          inc length
+          break
+        elif sc == '\n':
+          break
+        else:
+          advance()
+          inc length
+
+      # Determine type: look ahead past whitespace for ':'
+      var lookPos = pos
+      while lookPos < text.len and text[lookPos] in {' ', '\t', '\r', '\n'}:
+        inc lookPos
+      let isProperty = lookPos < text.len and text[lookPos] == ':'
+
+      if sLine >= startLine and sLine <= endLine:
+        if isProperty:
+          result.add(JsonToken(kind: jtProperty, line: sLine, col: sCol, length: length))
+        else:
+          result.add(JsonToken(kind: jtString, line: sLine, col: sCol, length: length))
+
+    of '-', '0'..'9':
+      let sLine = line
+      let sCol = col
+      var length = 0
+      if ch() == '-':
+        advance()
+        inc length
+      while pos < text.len and text[pos] in {'0'..'9'}:
+        advance()
+        inc length
+      if pos < text.len and text[pos] == '.':
+        advance()
+        inc length
+        while pos < text.len and text[pos] in {'0'..'9'}:
+          advance()
+          inc length
+      if pos < text.len and text[pos] in {'e', 'E'}:
+        advance()
+        inc length
+        if pos < text.len and text[pos] in {'+', '-'}:
+          advance()
+          inc length
+        while pos < text.len and text[pos] in {'0'..'9'}:
+          advance()
+          inc length
+      if sLine >= startLine and sLine <= endLine:
+        result.add(JsonToken(kind: jtNumber, line: sLine, col: sCol, length: length))
+
+    of 't':
+      let sLine = line
+      let sCol = col
+      if pos + 3 < text.len and text[pos..pos+3] == "true":
+        for _ in 0..<4: advance()
+        if sLine >= startLine and sLine <= endLine:
+          result.add(JsonToken(kind: jtKeyword, line: sLine, col: sCol, length: 4))
+      else:
+        advance()
+
+    of 'f':
+      let sLine = line
+      let sCol = col
+      if pos + 4 < text.len and text[pos..pos+4] == "false":
+        for _ in 0..<5: advance()
+        if sLine >= startLine and sLine <= endLine:
+          result.add(JsonToken(kind: jtKeyword, line: sLine, col: sCol, length: 5))
+      else:
+        advance()
+
+    of 'n':
+      let sLine = line
+      let sCol = col
+      if pos + 3 < text.len and text[pos..pos+3] == "null":
+        for _ in 0..<4: advance()
+        if sLine >= startLine and sLine <= endLine:
+          result.add(JsonToken(kind: jtKeyword, line: sLine, col: sCol, length: 4))
+      else:
+        advance()
+
+    of '{', '}', '[', ']', ':', ',':
+      advance()
+
+    else:
+      advance()
+
+# ---------------------------------------------------------------------------
 # LSP Protocol I/O
 # ---------------------------------------------------------------------------
 
@@ -382,7 +527,8 @@ proc main() =
               "tokenTypes": ["property", "string", "number", "keyword"],
               "tokenModifiers": []
             },
-            "full": true
+            "full": true,
+            "range": true
           }
         }
       })
@@ -419,7 +565,9 @@ proc main() =
           if documents[i].uri == uri:
             documents[i].text = newText
             documents[i].version = version
-            publishDiagnostics(uri, newText)
+            # Skip diagnostics for large files (>1MB) to avoid slow tokenization
+            if newText.len < 1_000_000:
+              publishDiagnostics(uri, newText)
             break
 
     of "textDocument/didClose":
@@ -437,6 +585,24 @@ proc main() =
           text = doc.text
           break
       let (tokens, _) = tokenizeJson(text)
+      let data = encodeSemanticTokens(tokens)
+      var dataJson = newJArray()
+      for v in data:
+        dataJson.add(%v)
+      sendResponse(id, %*{"data": dataJson})
+
+    of "textDocument/semanticTokens/range":
+      let params = msg["params"]
+      let uri = params["textDocument"]["uri"].getStr()
+      let rangeNode = params["range"]
+      let startLine = rangeNode["start"]["line"].getInt()
+      let endLine = rangeNode["end"]["line"].getInt()
+      var text = ""
+      for doc in documents:
+        if doc.uri == uri:
+          text = doc.text
+          break
+      let tokens = tokenizeJsonRange(text, startLine, endLine)
       let data = encodeSemanticTokens(tokens)
       var dataJson = newJArray()
       for v in data:
