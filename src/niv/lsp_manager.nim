@@ -135,7 +135,7 @@ proc initLspManager*() =
       name: "niv_nim_lsp",
       command: "niv_nim_lsp",
       languages: @["nim"],
-      extensions: @[".nim", ".nims"],
+      extensions: @[".nim", ".nims", ".nimble"],
       languageId: "nim",
       category: scLsp,
       bundled: true,
