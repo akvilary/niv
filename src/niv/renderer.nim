@@ -354,7 +354,14 @@ proc render*(state: EditorState) =
     "[No Name]"
 
   let modFlag = if state.buffer.modified: " [+]" else: ""
-  let lspIndicator = if lspIsActive(): " [LSP]" else: ""
+  let lspIndicator = if not lspIsActive(): ""
+    elif tokenLegend.len > 0 and state.buffer.lineCount > 0:
+      let highlighted = if bgHighlightNextLine >= 0: bgHighlightNextLine
+                        elif bgHighlightTotalLines > 0: bgHighlightTotalLines
+                        else: 0
+      let pct = min(100, highlighted * 100 div state.buffer.lineCount)
+      " [LSP|" & $pct & "%]"
+    else: " [LSP]"
   let loadingIndicator = if not state.buffer.fullyLoaded and state.buffer.totalSize > 0:
     let pct = int(state.buffer.loadedBytes * 100 div state.buffer.totalSize)
     " [Loading " & $pct & "%]"

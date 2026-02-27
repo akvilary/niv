@@ -264,10 +264,19 @@ proc handleFileLoaderEvents(state: var EditorState): bool =
       # Remove trailing empty line if file ends with newline
       if state.buffer.lines.len > 1 and state.buffer.lines[^1].len == 0:
         state.buffer.lines.setLen(state.buffer.lines.len - 1)
-      # Refresh viewport highlights
+      # Sync full text with LSP and extend background highlighting
+      if lspState == lsRunning and state.buffer.filePath.len > 0 and
+         state.buffer.lineCount > lspSyncedLines:
+        let text = state.buffer.lines.join("\n")
+        sendDidChange(text)
+        lspSyncedLines = state.buffer.lineCount
       if lspHasSemanticTokensRange and lspState == lsRunning and tokenLegend.len > 0:
-        lastRangeTopLine = -1
-        requestViewportRangeTokens(state)
+        if bgHighlightNextLine >= 0:
+          # Still running — extend to cover full file
+          bgHighlightTotalLines = state.buffer.lineCount
+        elif bgHighlightTotalLines < state.buffer.lineCount:
+          # Finished initial pass — continue from where we left off
+          startBgHighlight(state.buffer.lineCount, bgHighlightTotalLines)
 
 proc run*(state: var EditorState) =
   enableRawMode()
@@ -296,11 +305,13 @@ proc run*(state: var EditorState) =
     # Request range tokens when viewport scrolls
     if lspHasSemanticTokensRange and lspState == lsRunning and
        tokenLegend.len > 0 and state.viewport.topLine != prevTopLine:
-      # Lazy sync: ensure LSP has text for the viewport area
       let viewportEnd = min(state.viewport.topLine + state.viewport.height,
                             state.buffer.lineCount)
-      syncLspToLine(state, viewportEnd)
-      requestViewportRangeTokens(state)
+      # Skip if background already highlighted this area
+      let bgDone = bgHighlightNextLine < 0 and bgHighlightTotalLines > 0
+      if not bgDone or viewportEnd > bgHighlightTotalLines:
+        syncLspToLine(state, viewportEnd)
+        requestViewportRangeTokens(state)
       prevTopLine = state.viewport.topLine
 
     # Render only when something changed
