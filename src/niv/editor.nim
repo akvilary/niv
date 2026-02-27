@@ -309,6 +309,8 @@ proc run*(state: var EditorState) =
 
     # Render only when something changed
     if needsRedraw:
+      if state.sidebar.visible:
+        adjustSidebarScroll(state.sidebar, state.viewport.height)
       render(state)
       needsRedraw = false
 

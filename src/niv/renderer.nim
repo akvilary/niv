@@ -5,7 +5,6 @@ import types
 import buffer
 import terminal
 import viewport
-import sidebar
 import lsp_manager
 import lsp_client
 import lsp_types
@@ -173,8 +172,6 @@ proc render*(state: EditorState) =
 
   # Draw sidebar
   if sidebarVisible:
-    var sb = state.sidebar
-    adjustSidebarScroll(sb, height - 3)
     renderSidebar(state, height)
     setThemeColors()
 
