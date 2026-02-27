@@ -5,7 +5,7 @@
 ##   Worker thread -> reads LSP stdout (POSIX read), sends LspEvents via Channel
 ##   Communication: system Channel[LspEvent] (thread-safe, lock-free tryRecv)
 
-import std/[json, osproc, streams, strutils, os, posix]
+import std/[json, osproc, streams, strutils, os, posix, uri]
 import lsp_types
 import lsp_protocol
 import lsp_manager
@@ -161,11 +161,11 @@ proc filePathToUri*(path: string): string =
   "file://" & absolutePath(path)
 
 proc uriToFilePath*(uri: string): string =
-  ## Convert a file:// URI to a local path
+  ## Convert a file:// URI to a local path (decodes percent-encoding)
   if uri.startsWith("file://"):
-    uri[7..^1]
+    decodeUrl(uri[7..^1])
   else:
-    uri
+    decodeUrl(uri)
 
 proc nextLspId*(): int =
   result = lspNextId
@@ -191,7 +191,7 @@ proc popPendingRequest*(id: int): string =
       return
   result = ""
 
-proc startLsp*(command: string, rootPath: string) =
+proc startLsp*(command: string, args: seq[string], rootPath: string) =
   ## Start an LSP server subprocess and worker thread
   if lspState != lsOff:
     return
@@ -205,6 +205,7 @@ proc startLsp*(command: string, rootPath: string) =
     lspProcess = startProcess(
       command = command,
       workingDir = rootPath,
+      args = args,
       options = {poUsePath}
     )
   except OSError:
@@ -253,13 +254,13 @@ proc pollLspEvent*(): (bool, LspEvent) =
   lspChannel.tryRecv()
 
 proc findLspServer*(command: string): string =
-  ## Find an LSP server binary: first in managed dir, then in PATH
+  ## Find an LSP server binary: bundled dir, managed dir, then PATH
+  let bundled = findBundledServer(command)
+  if bundled.len > 0:
+    return bundled
   let managed = serverBinPath(command)
   if fileExists(managed):
     return managed
-  let inPath = findExe(command)
-  if inPath.len > 0:
-    return inPath
   return ""
 
 var activeLspLanguageId*: string = ""
@@ -275,7 +276,7 @@ proc tryAutoStartLsp*(filePath: string) =
   if bin.len == 0:
     return
   activeLspLanguageId = server.languageId
-  startLsp(bin, getCurrentDir())
+  startLsp(bin, server.args, getCurrentDir())
 
 proc sendDidOpen*(filePath: string, text: string) =
   if lspState != lsRunning:

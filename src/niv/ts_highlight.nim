@@ -3,7 +3,7 @@
 ## Loads grammar .so files via dlopen, parses files into AST,
 ## runs highlight queries, and populates tsLines for rendering.
 
-import std/[dynlib, os]
+import std/[dynlib, os, re]
 import ts_bindings
 import ts_manager
 import highlight
@@ -99,6 +99,74 @@ proc loadGrammar*(lang: string): bool =
   tsState.active = true
   return true
 
+proc checkPredicates(query: ptr TSQuery, match: TSQueryMatch,
+                      source: string): bool =
+  ## Check #match? and #eq? predicates. Returns true if all pass.
+  var stepCount: uint32
+  let steps = ts_query_predicates_for_pattern(query, match.patternIndex, addr stepCount)
+  if stepCount == 0:
+    return true
+
+  var i: uint32 = 0
+  while i < stepCount:
+    if steps[i].theType == tsqpstString:
+      var nameLen: uint32
+      let namePtr = ts_query_string_value_for_id(query, steps[i].valueId, addr nameLen)
+      let predName = $namePtr
+      inc i
+
+      if predName == "match?":
+        # #match? @capture "regex"
+        if i < stepCount and steps[i].theType == tsqpstCapture:
+          let captureIdx = steps[i].valueId
+          inc i
+          if i < stepCount and steps[i].theType == tsqpstString:
+            var patLen: uint32
+            let patPtr = ts_query_string_value_for_id(query, steps[i].valueId, addr patLen)
+            let pattern = $patPtr
+            inc i
+            # Find capture node and check regex
+            for c in 0'u16..<match.captureCount:
+              if match.captures[c].index == captureIdx:
+                let startB = ts_node_start_byte(match.captures[c].node)
+                let endB = ts_node_end_byte(match.captures[c].node)
+                if endB <= uint32(source.len):
+                  let nodeText = source[startB..<endB]
+                  if not nodeText.contains(re(pattern)):
+                    return false
+                break
+      elif predName == "eq?":
+        # #eq? @capture "string"
+        if i < stepCount and steps[i].theType == tsqpstCapture:
+          let captureIdx = steps[i].valueId
+          inc i
+          if i < stepCount and steps[i].theType == tsqpstString:
+            var valLen: uint32
+            let valPtr = ts_query_string_value_for_id(query, steps[i].valueId, addr valLen)
+            let expected = $valPtr
+            inc i
+            for c in 0'u16..<match.captureCount:
+              if match.captures[c].index == captureIdx:
+                let startB = ts_node_start_byte(match.captures[c].node)
+                let endB = ts_node_end_byte(match.captures[c].node)
+                if endB <= uint32(source.len):
+                  let nodeText = source[startB..<endB]
+                  if nodeText != expected:
+                    return false
+                break
+      else:
+        # Unknown predicate — skip to Done
+        while i < stepCount and steps[i].theType != tsqpstDone:
+          inc i
+
+    # Skip Done step
+    if i < stepCount and steps[i].theType == tsqpstDone:
+      inc i
+    else:
+      inc i
+
+  return true
+
 proc tsParseAndHighlight*(text: string, lineCount: int) =
   ## Parse text with tree-sitter and populate tsLines
   if not tsState.active or tsState.parser == nil:
@@ -125,6 +193,10 @@ proc tsParseAndHighlight*(text: string, lineCount: int) =
   var captureIndex: uint32
 
   while ts_query_cursor_next_capture(cursor, addr match, addr captureIndex):
+    # Check predicates (#match?, #eq?) before accepting capture
+    if not checkPredicates(tsState.query, match, text):
+      continue
+
     let capture = match.captures[captureIndex]
     let startPt = ts_node_start_point(capture.node)
     let endPt = ts_node_end_point(capture.node)

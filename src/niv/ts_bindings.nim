@@ -69,6 +69,26 @@ proc ts_query_delete*(self: ptr TSQuery) {.importc, header: "tree_sitter/api.h",
 proc ts_query_capture_name_for_id*(self: ptr TSQuery, index: uint32,
                                     length: ptr uint32): cstring {.importc, header: "tree_sitter/api.h", cdecl.}
 
+# Query predicates
+type
+  TSQueryPredicateStepType* = enum
+    tsqpstDone = 0
+    tsqpstCapture = 1
+    tsqpstString = 2
+
+  TSQueryPredicateStep* {.importc: "TSQueryPredicateStep", header: "tree_sitter/api.h", bycopy.} = object
+    theType* {.importc: "type".}: TSQueryPredicateStepType
+    valueId* {.importc: "value_id".}: uint32
+
+proc ts_query_predicates_for_pattern*(self: ptr TSQuery, patternIndex: uint32,
+                                       stepCount: ptr uint32): ptr UncheckedArray[TSQueryPredicateStep] {.importc, header: "tree_sitter/api.h", cdecl.}
+proc ts_query_string_value_for_id*(self: ptr TSQuery, id: uint32,
+                                    length: ptr uint32): cstring {.importc, header: "tree_sitter/api.h", cdecl.}
+
+# Node byte positions (for extracting text)
+proc ts_node_start_byte*(self: TSNode): uint32 {.importc, header: "tree_sitter/api.h", cdecl.}
+proc ts_node_end_byte*(self: TSNode): uint32 {.importc, header: "tree_sitter/api.h", cdecl.}
+
 # Query Cursor
 proc ts_query_cursor_new*(): ptr TSQueryCursor {.importc, header: "tree_sitter/api.h", cdecl.}
 proc ts_query_cursor_delete*(self: ptr TSQueryCursor) {.importc, header: "tree_sitter/api.h", cdecl.}

@@ -131,7 +131,13 @@ proc handleLspEvents(state: var EditorState): bool =
             locations.add(resultNode)
 
           if locations.len > 0:
-            let loc = locations[0]
+            # Prefer .py over .pyi stub files
+            var loc = locations[0]
+            for candidate in locations:
+              let cUri = candidate["uri"].getStr()
+              if not cUri.endsWith(".pyi"):
+                loc = candidate
+                break
             let uri = loc["uri"].getStr()
             let line = loc["range"]["start"]["line"].getInt()
             let col = loc["range"]["start"]["character"].getInt()
@@ -144,8 +150,9 @@ proc handleLspEvents(state: var EditorState): bool =
               lastRangeTopLine = -1
               lastRangeEndLine = -1
               state.buffer = newBuffer(filePath)
-              lspDocumentUri = filePathToUri(filePath)
               let text = state.buffer.lines.join("\n")
+              tryTsHighlight(filePath, text, state.buffer.lineCount)
+              lspDocumentUri = filePathToUri(filePath)
               sendDidOpen(filePath, text)
               lspSyncedLines = state.buffer.lineCount
               # Request range tokens for viewport

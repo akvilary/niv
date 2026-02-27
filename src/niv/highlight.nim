@@ -33,7 +33,7 @@ proc tokenColor*(typeName: string): int =
     0x89ddff   # Cyan
   of "type", "class", "enum", "interface", "struct", "typeParameter":
     0x2ac3de   # Bright cyan
-  of "function", "method":
+  of "function", "method", "builtinFunction":
     0x7aa2f7   # Blue
   of "macro", "decorator":
     0x9d7cd8   # Purple
@@ -41,8 +41,12 @@ proc tokenColor*(typeName: string): int =
     0x7aa2f7   # Blue
   of "parameter":
     0xe0af68   # Yellow
+  of "selfParameter", "clsParameter":
+    0xf7768e   # Red
   of "property":
     0x73daca   # Teal
+  of "builtinConstant":
+    0xff9e64   # Orange
   of "variable", "enumMember":
     0          # Default
   else:

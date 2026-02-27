@@ -8,6 +8,7 @@ const
   nivLspDir* = nivConfigDir / "lsp"
   nivLspBinDir* = nivLspDir / "bin"
   nivLspDisabledDir* = nivLspDir / "disabled"
+  nivLspEnabledDir* = nivLspDir / "enabled"
 
 type
   LspServerCategory* = enum
@@ -19,6 +20,7 @@ type
   LspServerInfo* = object
     name*: string
     command*: string       ## Executable name
+    args*: seq[string]     ## Extra arguments (e.g. @["--stdio"])
     installCmd*: string    ## Shell command to install
     uninstallCmd*: string  ## Shell command to uninstall
     languages*: seq[string]
@@ -27,6 +29,7 @@ type
     category*: LspServerCategory
     installed*: bool
     bundled*: bool         ## Bundled with niv (no install/uninstall subprocess)
+    enabledByDefault*: bool  ## If false, requires manual enable via LSP manager
 
   LspManagerState* = object
     visible*: bool
@@ -59,10 +62,13 @@ proc lspDisabledDir*(): string =
   ## Returns the full path to ~/.config/niv/lsp/disabled
   getHomeDir() / nivLspDisabledDir
 
+proc lspEnabledDir*(): string =
+  getHomeDir() / nivLspEnabledDir
+
 proc ensureLspDirs*() =
-  ## Create ~/.config/niv/lsp/bin and disabled dirs if they don't exist
   createDir(lspBinDir())
   createDir(lspDisabledDir())
+  createDir(lspEnabledDir())
 
 proc isServerDisabled*(name: string): bool =
   fileExists(lspDisabledDir() / name)
@@ -76,12 +82,30 @@ proc enableServer*(name: string) =
   if fileExists(path):
     removeFile(path)
 
+proc findBundledServer*(command: string): string =
+  ## Find a bundled server: check next to niv binary first, then PATH
+  let appDir = getAppDir()
+  let beside = appDir / command
+  if fileExists(beside):
+    return beside
+  let inPath = findExe(command)
+  if inPath.len > 0:
+    return inPath
+  return ""
+
+proc isServerExplicitlyEnabled*(name: string): bool =
+  fileExists(lspEnabledDir() / name)
+
 proc checkInstalled(server: var LspServerInfo) =
   if server.bundled:
-    server.installed = findExe(server.command).len > 0 and
-                       not isServerDisabled(server.name)
+    let binaryFound = findBundledServer(server.command).len > 0
+    if server.enabledByDefault:
+      server.installed = binaryFound and not isServerDisabled(server.name)
+    else:
+      server.installed = binaryFound and isServerExplicitlyEnabled(server.name)
   else:
-    server.installed = fileExists(serverBinPath(server.command))
+    server.installed = fileExists(serverBinPath(server.command)) or
+                       findExe(server.command).len > 0
 
 proc initLspManager*() =
   ensureLspDirs()
@@ -95,6 +119,17 @@ proc initLspManager*() =
       languageId: "json",
       category: scLsp,
       bundled: true,
+      enabledByDefault: true,
+    ),
+    LspServerInfo(
+      name: "niv_python_lsp",
+      command: "niv_python_lsp",
+      languages: @["python"],
+      extensions: @[".py"],
+      languageId: "python",
+      category: scLsp,
+      bundled: true,
+      enabledByDefault: true,
     ),
     LspServerInfo(
       name: "nimlangserver",
@@ -182,14 +217,17 @@ proc startInstall*() =
     lspMgr.statusMessage = server.name & " is already installed"
     return
 
-  # Bundled servers: just enable (remove disabled marker)
+  # Bundled servers: enable via marker files
   if server.bundled:
     enableServer(server.name)
+    if not server.enabledByDefault:
+      ensureLspDirs()
+      writeFile(lspEnabledDir() / server.name, "")
     checkInstalled(lspMgr.servers[lspMgr.cursorIndex])
     if lspMgr.servers[lspMgr.cursorIndex].installed:
       lspMgr.statusMessage = server.name & " enabled"
     else:
-      lspMgr.statusMessage = server.name & " not found in PATH"
+      lspMgr.statusMessage = server.name & " binary not found"
     return
 
   ensureLspDirs()
@@ -219,9 +257,12 @@ proc startUninstall*() =
     lspMgr.statusMessage = server.name & " is not installed"
     return
 
-  # Bundled servers: just disable (create disabled marker)
+  # Bundled servers: disable via marker files
   if server.bundled:
     disableServer(server.name)
+    if not server.enabledByDefault:
+      let enPath = lspEnabledDir() / server.name
+      if fileExists(enPath): removeFile(enPath)
     checkInstalled(lspMgr.servers[lspMgr.cursorIndex])
     lspMgr.statusMessage = server.name & " disabled"
     return
