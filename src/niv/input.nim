@@ -18,6 +18,7 @@ type
     akEnterCommand
     akPageUp, akPageDown
     akGotoDefinition
+    akGoBack
 
   InputResult* = object
     complete*: bool
@@ -86,6 +87,7 @@ proc processNormalKey*(pending: var string, key: InputKey): InputResult =
   of "e": pending = ""; return InputResult(complete: true, action: akMoveWordEnd)
   of "0": pending = ""; return InputResult(complete: true, action: akMoveLineStart)
   of "$": pending = ""; return InputResult(complete: true, action: akMoveLineEnd)
+  of "gb": pending = ""; return InputResult(complete: true, action: akGoBack)
   of "gd": pending = ""; return InputResult(complete: true, action: akGotoDefinition)
   of "gg": pending = ""; return InputResult(complete: true, action: akMoveToTop)
   of "G": pending = ""; return InputResult(complete: true, action: akMoveToBottom)

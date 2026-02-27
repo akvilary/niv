@@ -18,6 +18,7 @@ import lsp_types
 import lsp_protocol
 import highlight
 import fileio
+import jumplist
 
 proc newEditorState*(filePath: string = ""): EditorState =
   result.buffer = newBuffer(filePath)
@@ -116,6 +117,8 @@ proc handleLspEvents(state: var EditorState): bool =
             locations.add(resultNode)
 
           if locations.len > 0:
+            # Save current position for gb (go back)
+            pushJump(state.buffer.filePath, state.cursor, state.viewport.topLine)
             # Prefer .py over .pyi stub files
             var loc = locations[0]
             for candidate in locations:

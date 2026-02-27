@@ -1,5 +1,6 @@
 ## Normal mode key handler
 
+import std/strutils
 import types
 import buffer
 import cursor
@@ -9,6 +10,9 @@ import sidebar
 import lsp_types
 import lsp_client
 import lsp_protocol
+import highlight
+import fileio
+import jumplist
 
 proc handleNormalMode*(state: var EditorState, key: InputKey) =
   state.statusMessage = ""
@@ -178,6 +182,27 @@ proc handleNormalMode*(state: var EditorState, key: InputKey) =
       state.statusMessage = "LSP: goto definition..."
     else:
       state.statusMessage = "LSP not active"
+
+  of akGoBack:
+    let (hasJump, jump) = popJump()
+    if hasJump:
+      if jump.filePath != state.buffer.filePath:
+        stopFileLoader()
+        resetViewportRangeCache()
+        state.buffer = newBuffer(jump.filePath)
+        switchLsp(jump.filePath)
+        if lspState == lsRunning:
+          let text = state.buffer.lines.join("\n")
+          sendDidOpen(jump.filePath, text)
+          lspSyncedLines = state.buffer.lineCount
+          if lspHasSemanticTokensRange and tokenLegend.len > 0:
+            sendSemanticTokensRange(0, min(state.buffer.lineCount - 1, 50))
+            startBgHighlight(state.buffer.lineCount)
+      state.cursor = jump.cursor
+      state.viewport.topLine = jump.topLine
+      state.viewport.leftCol = 0
+    else:
+      state.statusMessage = "No previous location"
 
   of akEnterCommand:
     state.mode = mCommand
