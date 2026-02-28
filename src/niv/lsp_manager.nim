@@ -1,7 +1,7 @@
 ## LSP server manager (Mason-like registry, install/uninstall)
 ## Servers are installed into ~/.config/niv/lsp/ (managed directory)
 
-import std/[osproc, os, strutils, posix]
+import std/[osproc, os, strutils, posix, tables]
 
 const
   nivConfigDir* = ".config" / "niv"
@@ -40,6 +40,7 @@ type
     installing*: bool      ## True while install/uninstall runs in background
 
 var lspMgr*: LspManagerState
+var extToServerIdx: Table[string, int]
 var installProc: Process
 var installIdx: int = -1
 var installIsUninstall: bool = false
@@ -95,6 +96,14 @@ proc findBundledServer*(command: string): string =
 
 proc isServerExplicitlyEnabled*(name: string): bool =
   fileExists(lspEnabledDir() / name)
+
+proc rebuildExtTable() =
+  extToServerIdx.clear()
+  for i in 0..<lspMgr.servers.len:
+    if lspMgr.servers[i].installed:
+      for ext in lspMgr.servers[i].extensions:
+        if ext notin extToServerIdx:
+          extToServerIdx[ext] = i
 
 proc checkInstalled(server: var LspServerInfo) =
   if server.bundled:
@@ -204,6 +213,7 @@ proc initLspManager*() =
   ]
   for i in 0..<lspMgr.servers.len:
     checkInstalled(lspMgr.servers[i])
+  rebuildExtTable()
 
 proc findServerForFile*(filePath: string): ptr LspServerInfo =
   ## Find an installed server that handles the given file extension
@@ -211,16 +221,15 @@ proc findServerForFile*(filePath: string): ptr LspServerInfo =
             else: ""
   if ext.len == 0:
     return nil
-  for i in 0..<lspMgr.servers.len:
-    if lspMgr.servers[i].installed:
-      for e in lspMgr.servers[i].extensions:
-        if e == ext:
-          return addr lspMgr.servers[i]
+  if ext in extToServerIdx:
+    let idx = extToServerIdx[ext]
+    return addr lspMgr.servers[idx]
   return nil
 
 proc openLspManager*() =
   for i in 0..<lspMgr.servers.len:
     checkInstalled(lspMgr.servers[i])
+  rebuildExtTable()
   lspMgr.visible = true
   lspMgr.cursorIndex = 0
   lspMgr.scrollOffset = 0
@@ -284,6 +293,7 @@ proc startInstall*() =
       ensureLspDirs()
       writeFile(lspEnabledDir() / server.name, "")
     checkInstalled(lspMgr.servers[lspMgr.cursorIndex])
+    rebuildExtTable()
     if lspMgr.servers[lspMgr.cursorIndex].installed:
       lspMgr.statusMessage = server.name & " enabled"
     else:
@@ -324,6 +334,7 @@ proc startUninstall*() =
       let enPath = lspEnabledDir() / server.name
       if fileExists(enPath): removeFile(enPath)
     checkInstalled(lspMgr.servers[lspMgr.cursorIndex])
+    rebuildExtTable()
     lspMgr.statusMessage = server.name & " disabled"
     return
 
@@ -374,6 +385,7 @@ proc pollInstallProgress*(): bool =
   if exitCode == 0:
     if installIdx >= 0 and installIdx < lspMgr.servers.len:
       checkInstalled(lspMgr.servers[installIdx])
+    rebuildExtTable()
     if installIsUninstall:
       lspMgr.statusMessage = serverName & " uninstalled"
     else:

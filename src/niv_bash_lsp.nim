@@ -1,7 +1,7 @@
 ## niv_bash_lsp — minimal Bash/Shell Language Server with semantic tokens
 ## Communicates via stdin/stdout using JSON-RPC 2.0 with Content-Length framing
 
-import std/[json, strutils]
+import std/[json, strutils, sets, tables]
 
 # ---------------------------------------------------------------------------
 # Types
@@ -53,6 +53,11 @@ const bashKeywords = [
   "break", "continue",
   "true", "false",
 ]
+
+var bashKeywordSet: HashSet[string]
+
+proc initLookupSets() =
+  for kw in bashKeywords: bashKeywordSet.incl(kw)
 
 # ---------------------------------------------------------------------------
 # Bash Tokenizer
@@ -354,11 +359,7 @@ proc tokenizeBash(text: string): seq[BashToken] =
         continue
 
       # Check if keyword
-      var isKw = false
-      for kw in bashKeywords:
-        if word == kw:
-          isKw = true
-          break
+      let isKw = word in bashKeywordSet
 
       if isKw:
         tokens.add(BashToken(kind: btKeyword, line: sLine, col: sCol,
@@ -490,7 +491,8 @@ proc sendTokensResponse(id: JsonNode, data: seq[int]) =
 # ---------------------------------------------------------------------------
 
 proc main() =
-  var documents: seq[DocumentState]
+  initLookupSets()
+  var documents: Table[string, DocumentState]
   var running = true
 
   while running:
@@ -534,15 +536,7 @@ proc main() =
       let uri = td["uri"].getStr()
       let text = td["text"].getStr()
       let version = td["version"].getInt()
-      var found = false
-      for i in 0..<documents.len:
-        if documents[i].uri == uri:
-          documents[i].text = text
-          documents[i].version = version
-          found = true
-          break
-      if not found:
-        documents.add(DocumentState(uri: uri, text: text, version: version))
+      documents[uri] = DocumentState(uri: uri, text: text, version: version)
 
     of "textDocument/didChange":
       let params = msg["params"]
@@ -551,26 +545,17 @@ proc main() =
       let changes = params["contentChanges"]
       if changes.len > 0:
         let newText = changes[0]["text"].getStr()
-        for i in 0..<documents.len:
-          if documents[i].uri == uri:
-            documents[i].text = newText
-            documents[i].version = version
-            break
+        if uri in documents:
+          documents[uri].text = newText
+          documents[uri].version = version
 
     of "textDocument/didClose":
       let uri = msg["params"]["textDocument"]["uri"].getStr()
-      for i in 0..<documents.len:
-        if documents[i].uri == uri:
-          documents.delete(i)
-          break
+      documents.del(uri)
 
     of "textDocument/semanticTokens/full":
       let uri = msg["params"]["textDocument"]["uri"].getStr()
-      var text = ""
-      for doc in documents:
-        if doc.uri == uri:
-          text = doc.text
-          break
+      let text = if uri in documents: documents[uri].text else: ""
       let tokens = tokenizeBash(text)
       let data = encodeSemanticTokens(tokens)
       sendTokensResponse(id, data)
@@ -581,11 +566,7 @@ proc main() =
       let rangeNode = params["range"]
       let startLine = rangeNode["start"]["line"].getInt()
       let endLine = rangeNode["end"]["line"].getInt()
-      var text = ""
-      for doc in documents:
-        if doc.uri == uri:
-          text = doc.text
-          break
+      let text = if uri in documents: documents[uri].text else: ""
       let tokens = tokenizeBashRange(text, startLine, endLine)
       let data = encodeSemanticTokens(tokens)
       sendTokensResponse(id, data)

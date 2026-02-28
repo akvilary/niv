@@ -1,7 +1,7 @@
 ## niv_yaml_lsp — minimal YAML Language Server with semantic tokens
 ## Communicates via stdin/stdout using JSON-RPC 2.0 with Content-Length framing
 
-import std/[json, strutils]
+import std/[json, strutils, sets, tables]
 
 # ---------------------------------------------------------------------------
 # Types
@@ -41,6 +41,21 @@ const
   stType = 6
   stAnchor = 7
   stNamespace = 8
+
+var yamlNullSet: HashSet[string]
+var yamlBoolSet: HashSet[string]
+var yamlSpecialFloatSet: HashSet[string]
+
+proc initLookupSets() =
+  for v in ["null", "~", "Null", "NULL"]:
+    yamlNullSet.incl(v)
+  for v in ["true", "false", "True", "False", "TRUE", "FALSE",
+            "yes", "no", "Yes", "No", "YES", "NO",
+            "on", "off", "On", "Off", "ON", "OFF"]:
+    yamlBoolSet.incl(v)
+  for v in [".inf", "-.inf", "+.inf", ".Inf", "-.Inf", "+.Inf",
+            ".INF", "-.INF", "+.INF", ".nan", ".NaN", ".NAN"]:
+    yamlSpecialFloatSet.incl(v)
 
 # ---------------------------------------------------------------------------
 # YAML Tokenizer
@@ -173,12 +188,10 @@ proc tokenizeFlow(tokens: var seq[YamlToken], line: string, lineNum, start, endP
                                length: valEndTrim - valStart))
         else:
           let val = line[valStart..<valEndTrim]
-          if val in ["null", "~", "Null", "NULL"]:
+          if val in yamlNullSet:
             tokens.add(YamlToken(kind: ytKeyword, line: lineNum, col: valStart,
                                  length: valEndTrim - valStart))
-          elif val in ["true", "false", "True", "False", "TRUE", "FALSE",
-                       "yes", "no", "Yes", "No", "YES", "NO",
-                       "on", "off", "On", "Off", "ON", "OFF"]:
+          elif val in yamlBoolSet:
             tokens.add(YamlToken(kind: ytKeyword, line: lineNum, col: valStart,
                                  length: valEndTrim - valStart))
           elif isNumber(val):
@@ -240,16 +253,13 @@ proc tokenizeValue(tokens: var seq[YamlToken], line: string, lineNum, valStart, 
   while end2 > pos and line[end2 - 1] in {' ', '\t'}:
     dec end2
   let val = line[pos..<end2]
-  if val in ["null", "~", "Null", "NULL"]:
+  if val in yamlNullSet:
     tokens.add(YamlToken(kind: ytKeyword, line: lineNum, col: pos, length: end2 - pos))
     return
-  if val in ["true", "false", "True", "False", "TRUE", "FALSE",
-             "yes", "no", "Yes", "No", "YES", "NO",
-             "on", "off", "On", "Off", "ON", "OFF"]:
+  if val in yamlBoolSet:
     tokens.add(YamlToken(kind: ytKeyword, line: lineNum, col: pos, length: end2 - pos))
     return
-  if val in [".inf", "-.inf", "+.inf", ".Inf", "-.Inf", "+.Inf",
-             ".INF", "-.INF", "+.INF", ".nan", ".NaN", ".NAN"]:
+  if val in yamlSpecialFloatSet:
     tokens.add(YamlToken(kind: ytKeyword, line: lineNum, col: pos, length: end2 - pos))
     return
   if val.len > 0 and isNumber(val):
@@ -604,7 +614,8 @@ proc sendTokensResponse(id: JsonNode, data: seq[int]) =
 # ---------------------------------------------------------------------------
 
 proc main() =
-  var documents: seq[DocumentState]
+  initLookupSets()
+  var documents: Table[string, DocumentState]
   var running = true
 
   while running:
@@ -647,15 +658,7 @@ proc main() =
       let uri = td["uri"].getStr()
       let text = td["text"].getStr()
       let version = td["version"].getInt()
-      var found = false
-      for i in 0..<documents.len:
-        if documents[i].uri == uri:
-          documents[i].text = text
-          documents[i].version = version
-          found = true
-          break
-      if not found:
-        documents.add(DocumentState(uri: uri, text: text, version: version))
+      documents[uri] = DocumentState(uri: uri, text: text, version: version)
 
     of "textDocument/didChange":
       let params = msg["params"]
@@ -664,26 +667,17 @@ proc main() =
       let changes = params["contentChanges"]
       if changes.len > 0:
         let newText = changes[0]["text"].getStr()
-        for i in 0..<documents.len:
-          if documents[i].uri == uri:
-            documents[i].text = newText
-            documents[i].version = version
-            break
+        if uri in documents:
+          documents[uri].text = newText
+          documents[uri].version = version
 
     of "textDocument/didClose":
       let uri = msg["params"]["textDocument"]["uri"].getStr()
-      for i in 0..<documents.len:
-        if documents[i].uri == uri:
-          documents.delete(i)
-          break
+      documents.del(uri)
 
     of "textDocument/semanticTokens/full":
       let uri = msg["params"]["textDocument"]["uri"].getStr()
-      var text = ""
-      for doc in documents:
-        if doc.uri == uri:
-          text = doc.text
-          break
+      let text = if uri in documents: documents[uri].text else: ""
       let tokens = tokenizeYaml(text)
       let data = encodeSemanticTokens(tokens)
       sendTokensResponse(id, data)
@@ -694,11 +688,7 @@ proc main() =
       let rangeNode = params["range"]
       let startLine = rangeNode["start"]["line"].getInt()
       let endLine = rangeNode["end"]["line"].getInt()
-      var text = ""
-      for doc in documents:
-        if doc.uri == uri:
-          text = doc.text
-          break
+      let text = if uri in documents: documents[uri].text else: ""
       let tokens = tokenizeYamlRange(text, startLine, endLine)
       let data = encodeSemanticTokens(tokens)
       sendTokensResponse(id, data)

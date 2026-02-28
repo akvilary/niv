@@ -121,21 +121,21 @@ const nimBuiltinFunctions = [
   "GC_ref", "GC_unref",
 ]
 
-# Precomputed lookup tables for O(1) classification
-var keywordSet: Table[string, bool]
-var declKeywordSet: Table[string, bool]
-var kwOperatorSet: Table[string, bool]
-var builtinConstSet: Table[string, bool]
-var builtinTypeSet: Table[string, bool]
-var builtinFuncSet: Table[string, bool]
+# Precomputed lookup sets for O(1) classification
+var keywordSet: HashSet[string]
+var declKeywordSet: HashSet[string]
+var kwOperatorSet: HashSet[string]
+var builtinConstSet: HashSet[string]
+var builtinTypeSet: HashSet[string]
+var builtinFuncSet: HashSet[string]
 
 proc initLookupTables() =
-  for kw in nimKeywords: keywordSet[kw] = true
-  for kw in nimDeclKeywords: declKeywordSet[kw] = true
-  for kw in nimKwOperators: kwOperatorSet[kw] = true
-  for kw in nimBuiltinConstants: builtinConstSet[kw] = true
-  for kw in nimBuiltinTypes: builtinTypeSet[kw] = true
-  for kw in nimBuiltinFunctions: builtinFuncSet[kw] = true
+  for kw in nimKeywords: keywordSet.incl(kw)
+  for kw in nimDeclKeywords: declKeywordSet.incl(kw)
+  for kw in nimKwOperators: kwOperatorSet.incl(kw)
+  for kw in nimBuiltinConstants: builtinConstSet.incl(kw)
+  for kw in nimBuiltinTypes: builtinTypeSet.incl(kw)
+  for kw in nimBuiltinFunctions: builtinFuncSet.incl(kw)
 
 # ---------------------------------------------------------------------------
 # Multi-line token splitting (strings and comments)
@@ -483,18 +483,18 @@ proc tokenizeNim(text: string): (seq[NimToken], seq[DiagInfo]) =
           if indent < enumIndent:
             inEnumBody = false
           # Fallback classification
-          if builtinConstSet.hasKey(word):
+          if word in builtinConstSet:
             tokens.add(NimToken(kind: ntBuiltinConst, line: sLine, col: sCol, length: length))
-          elif kwOperatorSet.hasKey(word):
+          elif word in kwOperatorSet:
             tokens.add(NimToken(kind: ntOperator, line: sLine, col: sCol, length: length))
-      elif builtinConstSet.hasKey(word):
+      elif word in builtinConstSet:
         tokens.add(NimToken(kind: ntBuiltinConst, line: sLine, col: sCol, length: length))
-      elif kwOperatorSet.hasKey(word):
+      elif word in kwOperatorSet:
         tokens.add(NimToken(kind: ntOperator, line: sLine, col: sCol, length: length))
-      elif declKeywordSet.hasKey(word):
+      elif word in declKeywordSet:
         tokens.add(NimToken(kind: ntKeyword, line: sLine, col: sCol, length: length))
         lastKeyword = word
-      elif keywordSet.hasKey(word):
+      elif word in keywordSet:
         tokens.add(NimToken(kind: ntKeyword, line: sLine, col: sCol, length: length))
         # Track import/from lines
         if word == "import":
@@ -519,9 +519,9 @@ proc tokenizeNim(text: string): (seq[NimToken], seq[DiagInfo]) =
               if text[p2] == '\t': baseIndent += 4 else: inc baseIndent
               inc p2
             enumIndent = baseIndent + 2
-      elif builtinTypeSet.hasKey(word):
+      elif word in builtinTypeSet:
         tokens.add(NimToken(kind: ntType, line: sLine, col: sCol, length: length))
-      elif builtinFuncSet.hasKey(word):
+      elif word in builtinFuncSet:
         tokens.add(NimToken(kind: ntBuiltinFunc, line: sLine, col: sCol, length: length))
       elif word[0] in {'A'..'Z'}:
         # Uppercase identifier — likely a type
@@ -533,7 +533,7 @@ proc tokenizeNim(text: string): (seq[NimToken], seq[DiagInfo]) =
         if lookPos < text.len and text[lookPos] == '(':
           tokens.add(NimToken(kind: ntFunction, line: sLine, col: sCol, length: length))
         # else: plain variable, no token emitted
-      lastKeyword = if declKeywordSet.hasKey(word) or word == "type": word else: ""
+      lastKeyword = if word in declKeywordSet or word == "type": word else: ""
 
     # Backtick identifiers
     of '`':
@@ -862,14 +862,14 @@ proc tokenizeNimRange(text: string, startLine, endLine: int): seq[NimToken] =
           if inRange(): result.add(NimToken(kind: ntFunction, line: sLine, col: sCol, length: length))
         else:
           if inRange(): result.add(NimToken(kind: ntProperty, line: sLine, col: sCol, length: length))
-      elif builtinConstSet.hasKey(word):
+      elif word in builtinConstSet:
         if inRange(): result.add(NimToken(kind: ntBuiltinConst, line: sLine, col: sCol, length: length))
-      elif kwOperatorSet.hasKey(word):
+      elif word in kwOperatorSet:
         if inRange(): result.add(NimToken(kind: ntOperator, line: sLine, col: sCol, length: length))
-      elif declKeywordSet.hasKey(word):
+      elif word in declKeywordSet:
         if inRange(): result.add(NimToken(kind: ntKeyword, line: sLine, col: sCol, length: length))
         lastKeyword = word
-      elif keywordSet.hasKey(word):
+      elif word in keywordSet:
         if inRange(): result.add(NimToken(kind: ntKeyword, line: sLine, col: sCol, length: length))
         if word == "import": inImportLine = true; (if inFromLine: inFromLine = false)
         elif word == "from": inFromLine = true
@@ -882,9 +882,9 @@ proc tokenizeNimRange(text: string, startLine, endLine: int): seq[NimToken] =
           while p2 < text.len and text[p2] in {' ', '\t'}:
             if text[p2] == '\t': bi += 4 else: inc bi; inc p2
           enumIndent = bi + 2
-      elif builtinTypeSet.hasKey(word):
+      elif word in builtinTypeSet:
         if inRange(): result.add(NimToken(kind: ntType, line: sLine, col: sCol, length: length))
-      elif builtinFuncSet.hasKey(word):
+      elif word in builtinFuncSet:
         if inRange(): result.add(NimToken(kind: ntBuiltinFunc, line: sLine, col: sCol, length: length))
       elif word[0] in {'A'..'Z'}:
         if inRange(): result.add(NimToken(kind: ntType, line: sLine, col: sCol, length: length))
@@ -893,7 +893,7 @@ proc tokenizeNimRange(text: string, startLine, endLine: int): seq[NimToken] =
         while lookPos < text.len and text[lookPos] in {' ', '\t'}: inc lookPos
         if lookPos < text.len and text[lookPos] == '(':
           if inRange(): result.add(NimToken(kind: ntFunction, line: sLine, col: sCol, length: length))
-      lastKeyword = if declKeywordSet.hasKey(word) or word == "type": word else: ""
+      lastKeyword = if word in declKeywordSet or word == "type": word else: ""
 
     of '`':
       lastKeyword = ""
@@ -1486,7 +1486,7 @@ proc sendNotification(meth: string, params: JsonNode) {.used.} =
 
 proc main() =
   initLookupTables()
-  var documents: seq[DocumentState]
+  var documents: Table[string, DocumentState]
   var running = true
 
   while running:
@@ -1535,14 +1535,7 @@ proc main() =
       let uri = td["uri"].getStr()
       let text = td["text"].getStr()
       let version = td["version"].getInt()
-      var found = false
-      for i in 0..<documents.len:
-        if documents[i].uri == uri:
-          documents[i].text = text
-          documents[i].version = version
-          found = true; break
-      if not found:
-        documents.add(DocumentState(uri: uri, text: text, version: version))
+      documents[uri] = DocumentState(uri: uri, text: text, version: version)
 
     of "textDocument/didChange":
       let params = msg["params"]
@@ -1551,23 +1544,17 @@ proc main() =
       let changes = params["contentChanges"]
       if changes.len > 0:
         let newText = changes[0]["text"].getStr()
-        for i in 0..<documents.len:
-          if documents[i].uri == uri:
-            documents[i].text = newText
-            documents[i].version = version
-            break
+        if uri in documents:
+          documents[uri].text = newText
+          documents[uri].version = version
 
     of "textDocument/didClose":
       let uri = msg["params"]["textDocument"]["uri"].getStr()
-      for i in 0..<documents.len:
-        if documents[i].uri == uri:
-          documents.delete(i); break
+      documents.del(uri)
 
     of "textDocument/semanticTokens/full":
       let uri = msg["params"]["textDocument"]["uri"].getStr()
-      var text = ""
-      for doc in documents:
-        if doc.uri == uri: text = doc.text; break
+      let text = if uri in documents: documents[uri].text else: ""
       let (tokens, _) = tokenizeNim(text)
       let data = encodeSemanticTokens(tokens)
       sendTokensResponse(id, data)
@@ -1578,9 +1565,7 @@ proc main() =
       let rangeNode = params["range"]
       let startLine = rangeNode["start"]["line"].getInt()
       let endLine = rangeNode["end"]["line"].getInt()
-      var text = ""
-      for doc in documents:
-        if doc.uri == uri: text = doc.text; break
+      let text = if uri in documents: documents[uri].text else: ""
       let tokens = tokenizeNimRange(text, startLine, endLine)
       let data = encodeSemanticTokens(tokens)
       sendTokensResponse(id, data)
@@ -1590,13 +1575,9 @@ proc main() =
       let uri = params["textDocument"]["uri"].getStr()
       let defLine = params["position"]["line"].getInt()
       let defCol = params["position"]["character"].getInt()
-      var text = ""
+      let text = if uri in documents: documents[uri].text else: ""
       var filePath = ""
-      for doc in documents:
-        if doc.uri == uri:
-          text = doc.text
-          if uri.startsWith("file://"): filePath = uri[7..^1]
-          break
+      if uri.startsWith("file://"): filePath = uri[7..^1]
 
       let fileDir = if filePath.len > 0: parentDir(filePath) else: projectRoot
       let (qualifier, name) = getDefinitionContext(text, defLine, defCol)

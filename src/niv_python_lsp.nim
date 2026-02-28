@@ -116,19 +116,19 @@ const pythonBuiltinFunctions = [
   "super", "vars", "zip", "__import__",
 ]
 
-# Precomputed lookup tables for O(1) classification
-var keywordSet: Table[string, bool]
-var kwOperatorSet: Table[string, bool]
-var builtinConstSet: Table[string, bool]
-var builtinTypeSet: Table[string, bool]
-var builtinFuncSet: Table[string, bool]
+# Precomputed lookup sets for O(1) classification
+var keywordSet: HashSet[string]
+var kwOperatorSet: HashSet[string]
+var builtinConstSet: HashSet[string]
+var builtinTypeSet: HashSet[string]
+var builtinFuncSet: HashSet[string]
 
 proc initLookupTables() =
-  for kw in pythonKeywords: keywordSet[kw] = true
-  for kw in pythonKeywordOperators: kwOperatorSet[kw] = true
-  for kw in pythonBuiltinConstants: builtinConstSet[kw] = true
-  for kw in pythonBuiltinTypes: builtinTypeSet[kw] = true
-  for kw in pythonBuiltinFunctions: builtinFuncSet[kw] = true
+  for kw in pythonKeywords: keywordSet.incl(kw)
+  for kw in pythonKeywordOperators: kwOperatorSet.incl(kw)
+  for kw in pythonBuiltinConstants: builtinConstSet.incl(kw)
+  for kw in pythonBuiltinTypes: builtinTypeSet.incl(kw)
+  for kw in pythonBuiltinFunctions: builtinFuncSet.incl(kw)
 
 # ---------------------------------------------------------------------------
 # Multi-line string token splitting
@@ -385,15 +385,15 @@ proc tokenizePython(text: string): (seq[PythonToken], seq[DiagInfo]) =
             tokens.add(PythonToken(kind: ptFunction, line: sLine, col: sCol, length: length))
           else:
             tokens.add(PythonToken(kind: ptProperty, line: sLine, col: sCol, length: length))
-        elif builtinConstSet.hasKey(word):
+        elif word in builtinConstSet:
           tokens.add(PythonToken(kind: ptBuiltinConst, line: sLine, col: sCol, length: length))
-        elif kwOperatorSet.hasKey(word):
+        elif word in kwOperatorSet:
           tokens.add(PythonToken(kind: ptOperator, line: sLine, col: sCol, length: length))
-        elif keywordSet.hasKey(word):
+        elif word in keywordSet:
           tokens.add(PythonToken(kind: ptKeyword, line: sLine, col: sCol, length: length))
-        elif builtinTypeSet.hasKey(word):
+        elif word in builtinTypeSet:
           tokens.add(PythonToken(kind: ptType, line: sLine, col: sCol, length: length))
-        elif builtinFuncSet.hasKey(word):
+        elif word in builtinFuncSet:
           tokens.add(PythonToken(kind: ptBuiltin, line: sLine, col: sCol, length: length))
         else:
           # Lookahead: identifier followed by '(' → function call
@@ -855,19 +855,19 @@ proc tokenizePythonRange(text: string, startLine, endLine: int): seq[PythonToken
               result.add(PythonToken(kind: ptFunction, line: sLine, col: sCol, length: length))
             else:
               result.add(PythonToken(kind: ptProperty, line: sLine, col: sCol, length: length))
-        elif builtinConstSet.hasKey(word):
+        elif word in builtinConstSet:
           if inRange():
             result.add(PythonToken(kind: ptBuiltinConst, line: sLine, col: sCol, length: length))
-        elif kwOperatorSet.hasKey(word):
+        elif word in kwOperatorSet:
           if inRange():
             result.add(PythonToken(kind: ptOperator, line: sLine, col: sCol, length: length))
-        elif keywordSet.hasKey(word):
+        elif word in keywordSet:
           if inRange():
             result.add(PythonToken(kind: ptKeyword, line: sLine, col: sCol, length: length))
-        elif builtinTypeSet.hasKey(word):
+        elif word in builtinTypeSet:
           if inRange():
             result.add(PythonToken(kind: ptType, line: sLine, col: sCol, length: length))
-        elif builtinFuncSet.hasKey(word):
+        elif word in builtinFuncSet:
           if inRange():
             result.add(PythonToken(kind: ptBuiltin, line: sLine, col: sCol, length: length))
         else:
@@ -1479,7 +1479,7 @@ proc getDefinitionContext(text: string, line, col: int): (string, string) =
 proc main() =
   initLookupTables()
   initPythonPaths()
-  var documents: seq[DocumentState]
+  var documents: Table[string, DocumentState]
   var running = true
 
   while running:
@@ -1526,15 +1526,7 @@ proc main() =
       let uri = td["uri"].getStr()
       let text = td["text"].getStr()
       let version = td["version"].getInt()
-      var found = false
-      for i in 0..<documents.len:
-        if documents[i].uri == uri:
-          documents[i].text = text
-          documents[i].version = version
-          found = true
-          break
-      if not found:
-        documents.add(DocumentState(uri: uri, text: text, version: version))
+      documents[uri] = DocumentState(uri: uri, text: text, version: version)
       if text.len < 1_000_000:
         publishDiagnostics(uri, text)
 
@@ -1545,26 +1537,19 @@ proc main() =
       let changes = params["contentChanges"]
       if changes.len > 0:
         let newText = changes[0]["text"].getStr()
-        for i in 0..<documents.len:
-          if documents[i].uri == uri:
-            documents[i].text = newText
-            documents[i].version = version
-            if newText.len < 1_000_000:
-              publishDiagnostics(uri, newText)
-            break
+        if uri in documents:
+          documents[uri].text = newText
+          documents[uri].version = version
+          if newText.len < 1_000_000:
+            publishDiagnostics(uri, newText)
 
     of "textDocument/didClose":
       let uri = msg["params"]["textDocument"]["uri"].getStr()
-      for i in 0..<documents.len:
-        if documents[i].uri == uri:
-          documents.delete(i)
-          break
+      documents.del(uri)
 
     of "textDocument/semanticTokens/full":
       let uri = msg["params"]["textDocument"]["uri"].getStr()
-      var text = ""
-      for doc in documents:
-        if doc.uri == uri: text = doc.text; break
+      let text = if uri in documents: documents[uri].text else: ""
       let (tokens, _) = tokenizePython(text)
       let data = encodeSemanticTokens(tokens)
       sendTokensResponse(id, data)
@@ -1575,9 +1560,7 @@ proc main() =
       let rangeNode = params["range"]
       let startLine = rangeNode["start"]["line"].getInt()
       let endLine = rangeNode["end"]["line"].getInt()
-      var text = ""
-      for doc in documents:
-        if doc.uri == uri: text = doc.text; break
+      let text = if uri in documents: documents[uri].text else: ""
       let tokens = tokenizePythonRange(text, startLine, endLine)
       let data = encodeSemanticTokens(tokens)
       sendTokensResponse(id, data)
@@ -1587,14 +1570,10 @@ proc main() =
       let uri = params["textDocument"]["uri"].getStr()
       let defLine = params["position"]["line"].getInt()
       let defCol = params["position"]["character"].getInt()
-      var text = ""
+      let text = if uri in documents: documents[uri].text else: ""
       var filePath = ""
-      for doc in documents:
-        if doc.uri == uri:
-          text = doc.text
-          if uri.startsWith("file://"):
-            filePath = uri[7..^1]
-          break
+      if uri.startsWith("file://"):
+        filePath = uri[7..^1]
 
       let (qualifier, name) = getDefinitionContext(text, defLine, defCol)
 
