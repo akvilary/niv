@@ -654,14 +654,6 @@ proc tokenizeNim(text: string, startLine: int = 0, endLine: int = int.high): (se
   return (tokens, diags)
 
 # ---------------------------------------------------------------------------
-# Range tokenizer (for viewport)
-# ---------------------------------------------------------------------------
-
-proc tokenizeNimRange(text: string, startLine, endLine: int): seq[NimToken] =
-  let (tokens, _) = tokenizeNim(text, startLine, endLine)
-  return tokens
-
-# ---------------------------------------------------------------------------
 # Semantic Token Encoding
 # ---------------------------------------------------------------------------
 
@@ -1270,7 +1262,7 @@ proc main() =
       let startLine = rangeNode["start"]["line"].getInt()
       let endLine = rangeNode["end"]["line"].getInt()
       let text = if uri in documents: documents[uri].text else: ""
-      let tokens = tokenizeNimRange(text, startLine, endLine)
+      let (tokens, _) = tokenizeNim(text, startLine, endLine)
       let data = encodeSemanticTokens(tokens)
       sendTokensResponse(id, data)
 

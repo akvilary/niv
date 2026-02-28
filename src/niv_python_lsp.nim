@@ -665,14 +665,6 @@ proc encodeSemanticTokens(tokens: seq[PythonToken]): seq[int] =
     prevCol = tok.col
 
 # ---------------------------------------------------------------------------
-# Range Tokenizer
-# ---------------------------------------------------------------------------
-
-proc tokenizePythonRange(text: string, startLine, endLine: int): seq[PythonToken] =
-  let (tokens, _) = tokenizePython(text, startLine, endLine)
-  return tokens
-
-# ---------------------------------------------------------------------------
 # LSP Protocol I/O
 # ---------------------------------------------------------------------------
 
@@ -1185,7 +1177,7 @@ proc main() =
       let startLine = rangeNode["start"]["line"].getInt()
       let endLine = rangeNode["end"]["line"].getInt()
       let text = if uri in documents: documents[uri].text else: ""
-      let tokens = tokenizePythonRange(text, startLine, endLine)
+      let (tokens, _) = tokenizePython(text, startLine, endLine)
       let data = encodeSemanticTokens(tokens)
       sendTokensResponse(id, data)
 
