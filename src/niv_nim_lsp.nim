@@ -8,7 +8,7 @@
 ##   - Context-aware tokenization (proc/method/template/macro, parameters, pragmas)
 ##   - Go-to-definition with import resolution and inheritance chain (object of)
 
-import std/[json, strutils, os, tables, osproc, sets, algorithm]
+import std/[json, strutils, os, tables, osproc, sets]
 
 # ---------------------------------------------------------------------------
 # Types
@@ -73,7 +73,6 @@ const
 # Nim language data
 # ---------------------------------------------------------------------------
 
-# Sorted arrays for O(log n) binary search lookups (thread-safe, no GC)
 const nimKeywords = [
   "addr", "asm", "bind", "block", "break", "case", "concept",
   "const", "continue", "defer", "discard", "distinct", "do",
@@ -86,74 +85,43 @@ const nimKeywords = [
 
 # Keywords that define the next identifier's kind
 const nimDeclKeywords = [
-  "converter", "func", "iterator", "macro", "method", "proc", "template",
+  "proc", "func", "method", "template", "macro", "iterator", "converter",
 ]
 
 const nimKwOperators = [
-  "and", "as", "cast", "div", "in", "is", "isnot",
-  "mod", "not", "notin", "or", "shl", "shr", "xor",
+  "and", "or", "not", "xor", "shl", "shr", "div", "mod",
+  "in", "notin", "is", "isnot", "as", "cast",
 ]
 
-const nimBuiltinConstants = ["false", "nil", "true"]
+const nimBuiltinConstants = ["true", "false", "nil"]
 
 const nimBuiltinTypes = [
-  "BiggestFloat", "BiggestInt", "BiggestUInt",
-  "Natural", "Ordinal", "Positive",
-  "SomeFloat", "SomeInteger", "SomeNumber",
-  "any", "array", "auto", "bool", "byte",
-  "cdouble", "cfloat", "char", "cint", "clong",
-  "csize_t", "cstring", "cuint",
-  "float", "float32", "float64",
   "int", "int8", "int16", "int32", "int64",
-  "openArray", "pointer", "range",
-  "seq", "set", "string",
-  "typed", "typedesc", "uint",
-  "uint8", "uint16", "uint32", "uint64",
-  "untyped", "varargs", "void",
+  "uint", "uint8", "uint16", "uint32", "uint64",
+  "float", "float32", "float64", "bool", "char", "string",
+  "cstring", "pointer", "void", "auto", "any",
+  "untyped", "typed", "typedesc", "openArray", "varargs",
+  "seq", "set", "array", "Natural", "Positive", "range",
+  "byte", "Ordinal", "SomeInteger", "SomeFloat", "SomeNumber",
+  "cint", "clong", "cuint", "csize_t", "cfloat", "cdouble",
+  "BiggestInt", "BiggestFloat", "BiggestUInt",
 ]
 
 const nimBuiltinFunctions = [
+  "echo", "len", "high", "low", "inc", "dec", "add", "del",
+  "insert", "contains", "find", "repr", "sizeof", "new", "newSeq",
+  "newString", "assert", "doAssert", "quit", "defined", "declared",
+  "compiles", "typeof", "ord", "chr", "succ", "pred", "abs",
+  "min", "max", "clamp", "swap", "deepCopy", "move", "wasMoved",
+  "reset", "default", "gorge", "staticRead", "staticExec",
+  "debugEcho", "write", "writeLine", "readLine",
+  "open", "close", "readFile", "writeFile", "readAll",
+  "pairs", "items", "mitems", "mpairs",
+  "alloc", "dealloc", "realloc", "allocShared",
   "GC_ref", "GC_unref",
-  "abs", "add", "alloc", "allocShared", "assert",
-  "chr", "clamp", "close", "compiles", "contains",
-  "debugEcho", "dec", "declared", "deepCopy", "default", "defined",
-  "del", "dealloc", "doAssert",
-  "echo", "find",
-  "gorge",
-  "high",
-  "inc", "insert", "items",
-  "len", "low",
-  "max", "min", "mitems", "move", "mpairs",
-  "new", "newSeq", "newString",
-  "open", "ord",
-  "pairs", "pred",
-  "quit",
-  "readAll", "readFile", "readLine", "realloc", "repr", "reset",
-  "sizeof", "staticExec", "staticRead", "succ", "swap",
-  "typeof",
-  "wasMoved", "write", "writeFile", "writeLine",
 ]
 
-# Thread-safe lookup procs using binary search on sorted const arrays (no GC)
-proc isNimKeyword(word: string): bool =
-  binarySearch(nimKeywords, word) >= 0
-
-proc isNimDeclKeyword(word: string): bool =
-  binarySearch(nimDeclKeywords, word) >= 0
-
-proc isNimKwOperator(word: string): bool =
-  binarySearch(nimKwOperators, word) >= 0
-
-proc isNimBuiltinConst(word: string): bool =
-  binarySearch(nimBuiltinConstants, word) >= 0
-
-proc isNimBuiltinType(word: string): bool =
-  binarySearch(nimBuiltinTypes, word) >= 0
-
-proc isNimBuiltinFunc(word: string): bool =
-  binarySearch(nimBuiltinFunctions, word) >= 0
-
-# Precomputed lookup tables for O(1) classification (main thread only)
+# Precomputed lookup tables for O(1) classification
 var keywordSet: Table[string, bool]
 var declKeywordSet: Table[string, bool]
 var kwOperatorSet: Table[string, bool]
@@ -681,111 +649,12 @@ proc tokenizeNim(text: string): (seq[NimToken], seq[DiagInfo]) =
   return (tokens, diags)
 
 # ---------------------------------------------------------------------------
-# Parallel Tokenizer
+# Range tokenizer (for viewport)
 # ---------------------------------------------------------------------------
 
-const
-  MaxTokenThreads = 4
-  ParallelLineThreshold = 4000
-
-type
-  NimTokenizerState = object
-    blockCommentDepth: int
-    inMultiLineString: bool
-
-  NimSectionArgs = object
-    textPtr: ptr UncheckedArray[char]
-    textLen: int
-    startPos: int
-    endPos: int
-    startLine: int
-    initState: NimTokenizerState
-    chanIdx: int
-
-var nimSectionChannels: array[MaxTokenThreads, Channel[seq[NimToken]]]
-var nimSectionThreads: array[MaxTokenThreads, Thread[NimSectionArgs]]
-
-proc preScanNimState(text: string, startPos, endPos: int, initState: NimTokenizerState): NimTokenizerState =
-  ## Lightweight pre-scan tracking only cross-line state: block comment depth
-  ## and multi-line string (triple-quoted).
-  result = initState
-  var pos = startPos
-  while pos < endPos:
-    if result.blockCommentDepth > 0:
-      # Inside block comment — scan for nested #[ or closing ]#
-      if pos + 1 < endPos and text[pos] == '#' and text[pos+1] == '[':
-        inc result.blockCommentDepth
-        pos += 2
-      elif pos + 1 < endPos and text[pos] == ']' and text[pos+1] == '#':
-        dec result.blockCommentDepth
-        pos += 2
-      else:
-        inc pos
-      continue
-    if result.inMultiLineString:
-      # Inside triple-quoted string — scan for closing """
-      if pos + 2 < endPos and text[pos] == '"' and text[pos+1] == '"' and text[pos+2] == '"':
-        result.inMultiLineString = false
-        pos += 3
-      else:
-        inc pos
-      continue
-    # Normal mode
-    # Single-line comment — skip to end of line
-    if text[pos] == '#':
-      if pos + 1 < endPos and text[pos+1] == '[':
-        # Block comment start
-        result.blockCommentDepth = 1
-        pos += 2
-        continue
-      else:
-        # Single-line comment: skip to newline
-        while pos < endPos and text[pos] != '\n':
-          inc pos
-        continue
-    # Triple-quoted string
-    if pos + 2 < endPos and text[pos] == '"' and text[pos+1] == '"' and text[pos+2] == '"':
-      result.inMultiLineString = true
-      pos += 3
-      continue
-    # Raw triple-quoted string: r"""..."""
-    if text[pos] in {'r', 'R'} and pos + 3 < endPos and text[pos+1] == '"' and text[pos+2] == '"' and text[pos+3] == '"':
-      result.inMultiLineString = true
-      pos += 4
-      continue
-    # Regular string: skip to end (no cross-line state)
-    if text[pos] == '"':
-      inc pos
-      while pos < endPos and text[pos] != '"' and text[pos] != '\n':
-        if text[pos] == '\\' and pos + 1 < endPos: inc pos
-        inc pos
-      if pos < endPos and text[pos] == '"': inc pos
-      continue
-    # Character literal
-    if text[pos] == '\'':
-      inc pos
-      if pos < endPos and text[pos] == '\\':
-        inc pos
-        if pos < endPos: inc pos
-      elif pos < endPos: inc pos
-      if pos < endPos and text[pos] == '\'': inc pos
-      continue
-    inc pos
-
-proc nimIsIdentChar(c: char): bool =
-  c in {'a'..'z', 'A'..'Z', '0'..'9', '_'}
-
-proc nimSectionWorker(args: NimSectionArgs) {.thread.} =
-  ## Tokenize a section of Nim text with given initial cross-line state.
-  ## This is a standalone proc (no closures) suitable for thread execution.
-  var sectionLen = args.endPos - args.startPos
-  var text = newString(sectionLen)
-  if sectionLen > 0:
-    copyMem(addr text[0], addr args.textPtr[args.startPos], sectionLen)
-
-  var tokens: seq[NimToken]
+proc tokenizeNimRange(text: string, startLine, endLine: int): seq[NimToken] =
   var pos = 0
-  var line = args.startLine
+  var line = 0
   var col = 0
   var lastKeyword = ""
 
@@ -795,9 +664,13 @@ proc nimSectionWorker(args: NimSectionArgs) {.thread.} =
   var afterDot = false
   var inImportLine = false
   var inFromLine = false
+  var inTypeSection {.used.} = false
   var afterTypeEquals = false
   var inEnumBody = false
   var enumIndent = 0
+
+  proc isIdentChar(c: char): bool =
+    c in {'a'..'z', 'A'..'Z', '0'..'9', '_'}
 
   template ch(): char =
     if pos < text.len: text[pos] else: '\0'
@@ -815,73 +688,19 @@ proc nimSectionWorker(args: NimSectionArgs) {.thread.} =
     while pos < text.len and text[pos] in {' ', '\t', '\r', '\n'}:
       advance()
 
-  # Handle initial state: if starting inside a block comment, scan for closing ]#
-  if args.initState.blockCommentDepth > 0:
-    var depth = args.initState.blockCommentDepth
-    let sLine = line
-    let sCol = col
-    let startPos2 = pos
-    while pos < text.len and depth > 0:
-      if pos + 1 < text.len and text[pos] == '#' and text[pos + 1] == '[':
-        inc depth; advance(); advance()
-      elif pos + 1 < text.len and text[pos] == ']' and text[pos + 1] == '#':
-        dec depth; advance(); advance()
-      else:
-        advance()
-    # Emit multi-line comment tokens line by line
-    if sLine == line:
-      tokens.add(NimToken(kind: ntComment, line: sLine, col: sCol, length: col - sCol))
-    else:
-      var p = startPos2
-      var curLine = sLine
-      while p < pos:
-        let tokenCol = if curLine == sLine: sCol else: 0
-        var lineLen = 0
-        while startPos2 + lineLen < pos and p + lineLen < text.len and text[p + lineLen] != '\n':
-          inc lineLen
-        tokens.add(NimToken(kind: ntComment, line: curLine, col: tokenCol, length: lineLen))
-        p += lineLen
-        if p < text.len and text[p] == '\n': inc p
-        inc curLine
+  template inRange(): bool =
+    line >= startLine and line <= endLine
 
-  # Handle initial state: if starting inside a multi-line string, scan for closing """
-  if args.initState.inMultiLineString:
-    let sLine = line
-    let sCol = col
-    let startPos2 = pos
-    while pos < text.len:
-      if pos + 2 < text.len and text[pos] == '"' and text[pos + 1] == '"' and text[pos + 2] == '"':
-        advance(); advance(); advance()
-        break
-      advance()
-    # Emit multi-line string tokens line by line
-    if sLine == line:
-      tokens.add(NimToken(kind: ntString, line: sLine, col: sCol, length: col - sCol))
-    else:
-      var p = startPos2
-      var curLine = sLine
-      while p < pos:
-        let tokenCol = if curLine == sLine: sCol else: 0
-        var lineLen = 0
-        while p + lineLen < pos and p + lineLen < text.len and text[p + lineLen] != '\n':
-          inc lineLen
-        tokens.add(NimToken(kind: ntString, line: curLine, col: tokenCol, length: lineLen))
-        p += lineLen
-        if p < text.len and text[p] == '\n': inc p
-        inc curLine
-
-  # Main tokenization loop
   while pos < text.len:
     skipWS()
     if pos >= text.len: break
+    if line > endLine and not inFuncParams: break
     let c = ch()
 
     case c
-    # Comments
     of '#':
-      let sLine = line; let sCol = col; let startPos2 = pos
+      let sLine = line; let sCol = col; let startPos = pos
       if pos + 1 < text.len and text[pos + 1] == '[':
-        # Multi-line comment #[ ... ]#
         advance(); advance()
         var depth = 1
         while pos < text.len and depth > 0:
@@ -889,72 +708,42 @@ proc nimSectionWorker(args: NimSectionArgs) {.thread.} =
             inc depth; advance(); advance()
           elif pos + 1 < text.len and text[pos] == ']' and text[pos + 1] == '#':
             dec depth; advance(); advance()
-          else:
-            advance()
-        # Emit multi-line comment tokens
-        if sLine == line:
-          tokens.add(NimToken(kind: ntComment, line: sLine, col: sCol, length: col - sCol))
-        else:
-          var p = startPos2
-          var curLine = sLine
-          while p < pos:
-            let tokenCol = if curLine == sLine: sCol else: 0
-            var lineLen = 0
-            while p + lineLen < pos and p + lineLen < text.len and text[p + lineLen] != '\n':
-              inc lineLen
-            tokens.add(NimToken(kind: ntComment, line: curLine, col: tokenCol, length: lineLen))
-            p += lineLen
-            if p < text.len and text[p] == '\n': inc p
-            inc curLine
+          else: advance()
+        emitMultiLineTokens(result, ntComment, text, startPos, pos, sLine, sCol, line,
+                             startLine, endLine)
       else:
-        # Single line comment
         var length = 0
         while pos < text.len and text[pos] != '\n':
           advance(); inc length
-        tokens.add(NimToken(kind: ntComment, line: sLine, col: sCol, length: length))
+        if inRange():
+          result.add(NimToken(kind: ntComment, line: sLine, col: sCol, length: length))
 
-    # Strings
     of '"':
       lastKeyword = ""; afterDot = false
-      let sLine = line; let sCol = col; let startPos2 = pos
+      let sLine = line; let sCol = col; let startPos = pos
       if pos + 2 < text.len and text[pos + 1] == '"' and text[pos + 2] == '"':
-        # Triple-quoted string
         advance(); advance(); advance()
         while pos < text.len:
           if pos + 2 < text.len and text[pos] == '"' and text[pos + 1] == '"' and text[pos + 2] == '"':
             advance(); advance(); advance(); break
           advance()
-        # Emit multi-line string tokens
-        if sLine == line:
-          tokens.add(NimToken(kind: ntString, line: sLine, col: sCol, length: col - sCol))
-        else:
-          var p = startPos2
-          var curLine = sLine
-          while p < pos:
-            let tokenCol = if curLine == sLine: sCol else: 0
-            var lineLen = 0
-            while p + lineLen < pos and p + lineLen < text.len and text[p + lineLen] != '\n':
-              inc lineLen
-            tokens.add(NimToken(kind: ntString, line: curLine, col: tokenCol, length: lineLen))
-            p += lineLen
-            if p < text.len and text[p] == '\n': inc p
-            inc curLine
+        emitMultiLineTokens(result, ntString, text, startPos, pos, sLine, sCol, line,
+                             startLine, endLine)
       else:
-        # Regular string
         advance()
         while pos < text.len:
           if text[pos] == '\\': advance(); (if pos < text.len: advance())
           elif text[pos] == '"': advance(); break
           elif text[pos] == '\n': break
           else: advance()
-        tokens.add(NimToken(kind: ntString, line: sLine, col: sCol, length: pos - startPos2))
+        if inRange():
+          result.add(NimToken(kind: ntString, line: sLine, col: sCol, length: pos - startPos))
 
-    # Character literals
     of '\'':
       let prevIsAlnum = pos > 0 and text[pos - 1] in {'a'..'z', 'A'..'Z', '0'..'9', '_'}
       if prevIsAlnum:
         advance()
-        while pos < text.len and nimIsIdentChar(text[pos]): advance()
+        while pos < text.len and isIdentChar(text[pos]): advance()
       else:
         lastKeyword = ""; afterDot = false
         let sLine = line; let sCol = col
@@ -963,12 +752,12 @@ proc nimSectionWorker(args: NimSectionArgs) {.thread.} =
           advance(); (if pos < text.len: advance())
         elif pos < text.len: advance()
         if pos < text.len and text[pos] == '\'': advance()
-        tokens.add(NimToken(kind: ntString, line: sLine, col: sCol, length: col - sCol))
+        if inRange():
+          result.add(NimToken(kind: ntString, line: sLine, col: sCol, length: col - sCol))
 
-    # Numbers
     of '0'..'9':
       lastKeyword = ""; afterDot = false
-      let sLine = line; let sCol = col; let startPos2 = pos
+      let sLine = line; let sCol = col; let startPos = pos
       if c == '0' and pos + 1 < text.len and text[pos + 1] in {'x', 'X'}:
         advance(); advance()
         while pos < text.len and text[pos] in {'0'..'9', 'a'..'f', 'A'..'F', '_'}: advance()
@@ -989,55 +778,42 @@ proc nimSectionWorker(args: NimSectionArgs) {.thread.} =
           while pos < text.len and text[pos] in {'0'..'9', '_'}: advance()
       if pos < text.len and text[pos] == '\'':
         advance()
-        while pos < text.len and nimIsIdentChar(text[pos]): advance()
-      tokens.add(NimToken(kind: ntNumber, line: sLine, col: sCol, length: pos - startPos2))
+        while pos < text.len and isIdentChar(text[pos]): advance()
+      if inRange():
+        result.add(NimToken(kind: ntNumber, line: sLine, col: sCol, length: pos - startPos))
 
-    # Identifiers and keywords
     of 'a'..'z', 'A'..'Z', '_':
-      let sLine = line; let sCol = col; let startPos2 = pos
+      let sLine = line; let sCol = col; let startPos = pos
       let wasDot = afterDot; afterDot = false
 
       # Raw string check
       if c in {'r', 'R'} and pos + 1 < text.len and text[pos + 1] == '"':
         advance()
-        let strStart = startPos2
+        let strStart = startPos
         if pos + 2 < text.len and text[pos] == '"' and text[pos + 1] == '"' and text[pos + 2] == '"':
           advance(); advance(); advance()
           while pos < text.len:
             if pos + 2 < text.len and text[pos] == '"' and text[pos + 1] == '"' and text[pos + 2] == '"':
               advance(); advance(); advance(); break
             advance()
-          # Emit multi-line string tokens
-          if sLine == line:
-            tokens.add(NimToken(kind: ntString, line: sLine, col: sCol, length: col - sCol))
-          else:
-            var p = strStart
-            var curLine = sLine
-            while p < pos:
-              let tokenCol = if curLine == sLine: sCol else: 0
-              var lineLen = 0
-              while p + lineLen < pos and p + lineLen < text.len and text[p + lineLen] != '\n':
-                inc lineLen
-              tokens.add(NimToken(kind: ntString, line: curLine, col: tokenCol, length: lineLen))
-              p += lineLen
-              if p < text.len and text[p] == '\n': inc p
-              inc curLine
+          emitMultiLineTokens(result, ntString, text, strStart, pos, sLine, sCol, line,
+                               startLine, endLine)
         else:
           advance()
           while pos < text.len and text[pos] != '"' and text[pos] != '\n': advance()
           if pos < text.len and text[pos] == '"': advance()
-          tokens.add(NimToken(kind: ntString, line: sLine, col: sCol, length: pos - strStart))
+          if inRange():
+            result.add(NimToken(kind: ntString, line: sLine, col: sCol, length: pos - strStart))
         continue
 
-      # Read identifier
-      while pos < text.len and nimIsIdentChar(text[pos]): advance()
-      let word = text[startPos2..<pos]
-      let length = pos - startPos2
+      while pos < text.len and isIdentChar(text[pos]): advance()
+      let word = text[startPos..<pos]
+      let length = pos - startPos
       if pos < text.len and text[pos] == '*': advance()
 
-      # Classify the identifier
+      # Classify (same logic as full tokenizer)
       if lastKeyword in ["proc", "func", "iterator", "converter"]:
-        tokens.add(NimToken(kind: ntFunction, line: sLine, col: sCol, length: length))
+        if inRange(): result.add(NimToken(kind: ntFunction, line: sLine, col: sCol, length: length))
         lastKeyword = ""
         skipWS()
         if pos < text.len and text[pos] == '[':
@@ -1049,7 +825,7 @@ proc nimSectionWorker(args: NimSectionArgs) {.thread.} =
         if pos < text.len and text[pos] == '(':
           inFuncParams = true; funcParamDepth = 1; afterParamColon = false; advance()
       elif lastKeyword == "method":
-        tokens.add(NimToken(kind: ntMethod, line: sLine, col: sCol, length: length))
+        if inRange(): result.add(NimToken(kind: ntMethod, line: sLine, col: sCol, length: length))
         lastKeyword = ""
         skipWS()
         if pos < text.len and text[pos] == '[':
@@ -1061,7 +837,7 @@ proc nimSectionWorker(args: NimSectionArgs) {.thread.} =
         if pos < text.len and text[pos] == '(':
           inFuncParams = true; funcParamDepth = 1; afterParamColon = false; advance()
       elif lastKeyword in ["template", "macro"]:
-        tokens.add(NimToken(kind: ntMacro, line: sLine, col: sCol, length: length))
+        if inRange(): result.add(NimToken(kind: ntMacro, line: sLine, col: sCol, length: length))
         lastKeyword = ""
         skipWS()
         if pos < text.len and text[pos] == '[':
@@ -1073,126 +849,94 @@ proc nimSectionWorker(args: NimSectionArgs) {.thread.} =
         if pos < text.len and text[pos] == '(':
           inFuncParams = true; funcParamDepth = 1; afterParamColon = false; advance()
       elif lastKeyword == "type":
-        tokens.add(NimToken(kind: ntType, line: sLine, col: sCol, length: length))
+        if inRange(): result.add(NimToken(kind: ntType, line: sLine, col: sCol, length: length))
         lastKeyword = ""
-        afterTypeEquals = false
       elif inFuncParams and not afterParamColon:
-        tokens.add(NimToken(kind: ntParameter, line: sLine, col: sCol, length: length))
+        if inRange(): result.add(NimToken(kind: ntParameter, line: sLine, col: sCol, length: length))
       elif inImportLine or inFromLine:
-        tokens.add(NimToken(kind: ntNamespace, line: sLine, col: sCol, length: length))
+        if inRange(): result.add(NimToken(kind: ntNamespace, line: sLine, col: sCol, length: length))
       elif wasDot:
         var lookPos = pos
         while lookPos < text.len and text[lookPos] in {' ', '\t'}: inc lookPos
         if lookPos < text.len and text[lookPos] == '(':
-          tokens.add(NimToken(kind: ntFunction, line: sLine, col: sCol, length: length))
+          if inRange(): result.add(NimToken(kind: ntFunction, line: sLine, col: sCol, length: length))
         else:
-          tokens.add(NimToken(kind: ntProperty, line: sLine, col: sCol, length: length))
-      elif inEnumBody and not afterTypeEquals:
-        let lineStart = startPos2 - sCol
-        var indent = 0
-        var p2 = lineStart
-        while p2 < text.len and text[p2] in {' ', '\t'}:
-          if text[p2] == '\t': indent += 4 else: inc indent
-          inc p2
-        if indent >= enumIndent and p2 == startPos2:
-          tokens.add(NimToken(kind: ntEnumMember, line: sLine, col: sCol, length: length))
-        else:
-          if indent < enumIndent: inEnumBody = false
-          if isNimBuiltinConst(word):
-            tokens.add(NimToken(kind: ntBuiltinConst, line: sLine, col: sCol, length: length))
-          elif isNimKwOperator(word):
-            tokens.add(NimToken(kind: ntOperator, line: sLine, col: sCol, length: length))
-      elif isNimBuiltinConst(word):
-        tokens.add(NimToken(kind: ntBuiltinConst, line: sLine, col: sCol, length: length))
-      elif isNimKwOperator(word):
-        tokens.add(NimToken(kind: ntOperator, line: sLine, col: sCol, length: length))
-      elif isNimDeclKeyword(word):
-        tokens.add(NimToken(kind: ntKeyword, line: sLine, col: sCol, length: length))
+          if inRange(): result.add(NimToken(kind: ntProperty, line: sLine, col: sCol, length: length))
+      elif builtinConstSet.hasKey(word):
+        if inRange(): result.add(NimToken(kind: ntBuiltinConst, line: sLine, col: sCol, length: length))
+      elif kwOperatorSet.hasKey(word):
+        if inRange(): result.add(NimToken(kind: ntOperator, line: sLine, col: sCol, length: length))
+      elif declKeywordSet.hasKey(word):
+        if inRange(): result.add(NimToken(kind: ntKeyword, line: sLine, col: sCol, length: length))
         lastKeyword = word
-      elif isNimKeyword(word):
-        tokens.add(NimToken(kind: ntKeyword, line: sLine, col: sCol, length: length))
+      elif keywordSet.hasKey(word):
+        if inRange(): result.add(NimToken(kind: ntKeyword, line: sLine, col: sCol, length: length))
         if word == "import": inImportLine = true; (if inFromLine: inFromLine = false)
         elif word == "from": inFromLine = true
         elif word in ["include", "export"]: inImportLine = true
         elif word == "type": lastKeyword = "type"
         elif word == "enum" and afterTypeEquals:
           inEnumBody = true
-          let ls = startPos2 - sCol
+          let ls = startPos - sCol
           var bi = 0; var p2 = ls
           while p2 < text.len and text[p2] in {' ', '\t'}:
             if text[p2] == '\t': bi += 4 else: inc bi; inc p2
           enumIndent = bi + 2
-      elif isNimBuiltinType(word):
-        tokens.add(NimToken(kind: ntType, line: sLine, col: sCol, length: length))
-      elif isNimBuiltinFunc(word):
-        tokens.add(NimToken(kind: ntBuiltinFunc, line: sLine, col: sCol, length: length))
-      elif word.len > 0 and word[0] in {'A'..'Z'}:
-        tokens.add(NimToken(kind: ntType, line: sLine, col: sCol, length: length))
+      elif builtinTypeSet.hasKey(word):
+        if inRange(): result.add(NimToken(kind: ntType, line: sLine, col: sCol, length: length))
+      elif builtinFuncSet.hasKey(word):
+        if inRange(): result.add(NimToken(kind: ntBuiltinFunc, line: sLine, col: sCol, length: length))
+      elif word[0] in {'A'..'Z'}:
+        if inRange(): result.add(NimToken(kind: ntType, line: sLine, col: sCol, length: length))
       else:
         var lookPos = pos
         while lookPos < text.len and text[lookPos] in {' ', '\t'}: inc lookPos
         if lookPos < text.len and text[lookPos] == '(':
-          tokens.add(NimToken(kind: ntFunction, line: sLine, col: sCol, length: length))
-      lastKeyword = if isNimDeclKeyword(word) or word == "type": word else: ""
+          if inRange(): result.add(NimToken(kind: ntFunction, line: sLine, col: sCol, length: length))
+      lastKeyword = if declKeywordSet.hasKey(word) or word == "type": word else: ""
 
-    # Backtick identifiers
     of '`':
       lastKeyword = ""
       let sLine = line; let sCol = col
       advance()
       while pos < text.len and text[pos] != '`' and text[pos] != '\n': advance()
       if pos < text.len and text[pos] == '`': advance()
-      tokens.add(NimToken(kind: ntFunction, line: sLine, col: sCol, length: col - sCol))
+      if inRange():
+        result.add(NimToken(kind: ntFunction, line: sLine, col: sCol, length: col - sCol))
 
-    # Pragmas {. ... .}
     of '{':
       if pos + 1 < text.len and text[pos + 1] == '.':
-        let sLine = line; let sCol = col; let startPos2 = pos
+        let sLine = line; let sCol = col; let startPos = pos
         advance(); advance()
         while pos < text.len:
           if pos + 1 < text.len and text[pos] == '.' and text[pos + 1] == '}':
             advance(); advance(); break
           elif text[pos] == '\n': break
           else: advance()
-        # Emit multi-line decorator tokens
-        if sLine == line:
-          tokens.add(NimToken(kind: ntDecorator, line: sLine, col: sCol, length: col - sCol))
-        else:
-          var p = startPos2
-          var curLine = sLine
-          while p < pos:
-            let tokenCol = if curLine == sLine: sCol else: 0
-            var lineLen = 0
-            while p + lineLen < pos and p + lineLen < text.len and text[p + lineLen] != '\n':
-              inc lineLen
-            tokens.add(NimToken(kind: ntDecorator, line: curLine, col: tokenCol, length: lineLen))
-            p += lineLen
-            if p < text.len and text[p] == '\n': inc p
-            inc curLine
+        emitMultiLineTokens(result, ntDecorator, text, startPos, pos, sLine, sCol, line,
+                             startLine, endLine)
       else: advance()
 
-    # Dot
     of '.':
       if pos + 1 < text.len and text[pos + 1] == '.':
         let sLine = line; let sCol = col
         advance(); advance()
-        tokens.add(NimToken(kind: ntOperator, line: sLine, col: sCol, length: 2))
+        if inRange(): result.add(NimToken(kind: ntOperator, line: sLine, col: sCol, length: 2))
       else: afterDot = true; advance()
 
-    # Operators
     of '=':
       afterTypeEquals = true
       let sLine = line; let sCol = col
       advance()
       if pos < text.len and text[pos] == '=': advance()
-      tokens.add(NimToken(kind: ntOperator, line: sLine, col: sCol, length: col - sCol))
+      if inRange(): result.add(NimToken(kind: ntOperator, line: sLine, col: sCol, length: col - sCol))
 
     of '+', '-', '*', '/', '<', '>', '!', '~', '%', '&', '|', '^', '@', '$', '?':
       lastKeyword = ""; afterDot = false
-      let sLine = line; let sCol = col; let startPos2 = pos
+      let sLine = line; let sCol = col; let startPos = pos
       advance()
       while pos < text.len and text[pos] in {'=', '>', '<', '+', '-', '*', '/', '!', '~', '%', '&', '|', '^', '@', '$', '?'}: advance()
-      tokens.add(NimToken(kind: ntOperator, line: sLine, col: sCol, length: pos - startPos2))
+      if inRange(): result.add(NimToken(kind: ntOperator, line: sLine, col: sCol, length: pos - startPos))
 
     of '(':
       if inFuncParams: inc funcParamDepth
@@ -1212,68 +956,6 @@ proc nimSectionWorker(args: NimSectionArgs) {.thread.} =
       if inFuncParams: afterParamColon = false
       advance()
     else: advance()
-
-  nimSectionChannels[args.chanIdx].send(tokens)
-
-proc tokenizeNimParallel(text: string): (seq[NimToken], seq[DiagInfo]) =
-  if text.len == 0: return (@[], @[])
-
-  var lineOffsets: seq[int] = @[0]
-  for i in 0..<text.len:
-    if text[i] == '\n': lineOffsets.add(i + 1)
-  let totalLines = lineOffsets.len
-
-  if totalLines < ParallelLineThreshold:
-    return tokenizeNim(text)
-
-  let threadCount = min(countProcessors(), MaxTokenThreads)
-  if threadCount <= 1:
-    return tokenizeNim(text)
-
-  let textPtr = cast[ptr UncheckedArray[char]](unsafeAddr text[0])
-  let linesPerSection = totalLines div threadCount
-
-  # Pre-scan to determine state at each section boundary (sequential, cumulative)
-  var states: seq[NimTokenizerState] = @[NimTokenizerState()]
-  for t in 0..<threadCount - 1:
-    let sLine = t * linesPerSection
-    let eLine = (t + 1) * linesPerSection - 1
-    let startPos = lineOffsets[sLine]
-    let endPos = if eLine + 1 < lineOffsets.len: lineOffsets[eLine + 1] else: text.len
-    states.add(preScanNimState(text, startPos, endPos, states[t]))
-
-  for t in 0..<threadCount:
-    let sLine = t * linesPerSection
-    let eLine = if t == threadCount - 1: totalLines - 1
-                else: (t + 1) * linesPerSection - 1
-    let startPos = lineOffsets[sLine]
-    let endPos = if eLine + 1 < lineOffsets.len: lineOffsets[eLine + 1] else: text.len
-    nimSectionChannels[t].open()
-    createThread(nimSectionThreads[t], nimSectionWorker, NimSectionArgs(
-      textPtr: textPtr, textLen: text.len,
-      startPos: startPos, endPos: endPos,
-      startLine: sLine, initState: states[t], chanIdx: t
-    ))
-
-  var allTokens: seq[NimToken] = @[]
-  for t in 0..<threadCount:
-    joinThread(nimSectionThreads[t])
-    let (hasData, sectionTokens) = nimSectionChannels[t].tryRecv()
-    if hasData: allTokens.add(sectionTokens)
-    nimSectionChannels[t].close()
-
-  return (allTokens, @[])
-
-# ---------------------------------------------------------------------------
-# Range tokenizer (for viewport)
-# ---------------------------------------------------------------------------
-
-proc tokenizeNimRange(text: string, startLine, endLine: int): seq[NimToken] =
-  let (allTokens, _) = tokenizeNimParallel(text)
-  result = @[]
-  for tok in allTokens:
-    if tok.line >= startLine and tok.line <= endLine:
-      result.add(tok)
 
 # ---------------------------------------------------------------------------
 # Semantic Token Encoding
@@ -1784,6 +1466,17 @@ proc sendMessage(msg: JsonNode) =
 proc sendResponse(id: JsonNode, resultNode: JsonNode) =
   sendMessage(%*{"jsonrpc": "2.0", "id": id, "result": resultNode})
 
+proc sendTokensResponse(id: JsonNode, data: seq[int]) =
+  ## Send semantic tokens response with direct string building.
+  ## Avoids creating millions of JNode objects for the data array.
+  var body = """{"jsonrpc":"2.0","id":""" & $id & ""","result":{"data":["""
+  for i, v in data:
+    if i > 0: body.add(',')
+    body.addInt(v)
+  body.add("]}}")
+  stdout.write("Content-Length: " & $body.len & "\r\n\r\n" & body)
+  stdout.flushFile()
+
 proc sendNotification(meth: string, params: JsonNode) {.used.} =
   sendMessage(%*{"jsonrpc": "2.0", "method": meth, "params": params})
 
@@ -1875,11 +1568,9 @@ proc main() =
       var text = ""
       for doc in documents:
         if doc.uri == uri: text = doc.text; break
-      let (tokens, _) = tokenizeNimParallel(text)
+      let (tokens, _) = tokenizeNim(text)
       let data = encodeSemanticTokens(tokens)
-      var dataJson = newJArray()
-      for v in data: dataJson.add(%v)
-      sendResponse(id, %*{"data": dataJson})
+      sendTokensResponse(id, data)
 
     of "textDocument/semanticTokens/range":
       let params = msg["params"]
@@ -1892,9 +1583,7 @@ proc main() =
         if doc.uri == uri: text = doc.text; break
       let tokens = tokenizeNimRange(text, startLine, endLine)
       let data = encodeSemanticTokens(tokens)
-      var dataJson = newJArray()
-      for v in data: dataJson.add(%v)
-      sendResponse(id, %*{"data": dataJson})
+      sendTokensResponse(id, data)
 
     of "textDocument/definition":
       let params = msg["params"]

@@ -1,7 +1,7 @@
 ## niv_yaml_lsp — minimal YAML Language Server with semantic tokens
 ## Communicates via stdin/stdout using JSON-RPC 2.0 with Content-Length framing
 
-import std/[json, strutils, cpuinfo]
+import std/[json, strutils]
 
 # ---------------------------------------------------------------------------
 # Types
@@ -41,32 +41,6 @@ const
   stType = 6
   stAnchor = 7
   stNamespace = 8
-
-# ---------------------------------------------------------------------------
-# Parallel Tokenizer Infrastructure
-# ---------------------------------------------------------------------------
-
-const
-  MaxTokenThreads = 4
-  ParallelLineThreshold = 4000
-
-type
-  YamlTokenizerState = object
-    inBlockScalar: bool
-    blockScalarIndent: int
-    blockScalarType: char  # '|' or '>'
-
-  YamlSectionArgs = object
-    textPtr: ptr UncheckedArray[char]
-    textLen: int
-    startPos: int
-    endPos: int
-    startLine: int
-    initState: YamlTokenizerState
-    chanIdx: int
-
-var yamlSectionChannels: array[MaxTokenThreads, Channel[seq[YamlToken]]]
-var yamlSectionThreads: array[MaxTokenThreads, Thread[YamlSectionArgs]]
 
 # ---------------------------------------------------------------------------
 # YAML Tokenizer
@@ -536,400 +510,11 @@ proc tokenizeYaml(text: string): seq[YamlToken] =
   return tokens
 
 # ---------------------------------------------------------------------------
-# Parallel Tokenizer
-# ---------------------------------------------------------------------------
-
-proc preScanYamlState(text: string, startPos, endPos: int, initState: YamlTokenizerState): YamlTokenizerState =
-  ## Lightweight pre-scan tracking only cross-line state (block scalar).
-  ## Processes text[startPos..<endPos] line-by-line to determine the state
-  ## at the end of this section.
-  result = initState
-  var pos = startPos
-  while pos < endPos:
-    # Find start and end of current line
-    let lineStart = pos
-    while pos < endPos and text[pos] != '\n':
-      inc pos
-    let lineEnd = pos
-    if pos < endPos: inc pos  # skip \n
-
-    let lineLen = lineEnd - lineStart
-    if lineLen == 0:
-      # Empty line ends block scalar
-      if result.inBlockScalar:
-        result.inBlockScalar = false
-        result.blockScalarIndent = -1
-      continue
-
-    # Measure indent
-    var indent = 0
-    var lp = lineStart
-    while lp < lineEnd and text[lp] == ' ':
-      inc lp
-      inc indent
-
-    # Block scalar continuation check
-    if result.inBlockScalar:
-      if indent > result.blockScalarIndent or (lp < lineEnd and text[lp] == '\n'):
-        continue  # still in block scalar
-      else:
-        result.inBlockScalar = false
-        result.blockScalarIndent = -1
-
-    if lp >= lineEnd: continue
-
-    # Skip comment lines
-    if text[lp] == '#': continue
-
-    # Skip directives
-    if indent == 0 and text[lp] == '%': continue
-
-    # Skip document markers
-    if indent == 0 and lineLen >= 3:
-      if lineEnd - lineStart >= 3 and text[lineStart] == '-' and text[lineStart+1] == '-' and text[lineStart+2] == '-':
-        discard
-      elif lineEnd - lineStart >= 3 and text[lineStart] == '.' and text[lineStart+1] == '.' and text[lineStart+2] == '.':
-        continue
-
-    # Skip sequence indicator
-    if lp < lineEnd and text[lp] == '-' and lp + 1 < lineEnd and text[lp+1] == ' ':
-      lp += 2
-      while lp < lineEnd and text[lp] == ' ': inc lp
-
-    # Look for colon to find key: value
-    var colonPos = -1
-    var sp = lp
-    # Handle quoted keys
-    if sp < lineEnd and text[sp] in {'"', '\''}:
-      let quote = text[sp]
-      inc sp
-      while sp < lineEnd and text[sp] != quote:
-        if text[sp] == '\\' and quote == '"': inc sp
-        inc sp
-      if sp < lineEnd: inc sp
-      var qsp = sp
-      while qsp < lineEnd and text[qsp] == ' ': inc qsp
-      if qsp < lineEnd and text[qsp] == ':' and
-         (qsp + 1 >= lineEnd or text[qsp + 1] in {' ', '\n', '\r'}):
-        colonPos = qsp
-    else:
-      while sp < lineEnd:
-        if text[sp] == ':' and
-           (sp + 1 >= lineEnd or text[sp + 1] in {' ', '\n', '\r'}):
-          colonPos = sp
-          break
-        if text[sp] == '#' and sp > lineStart and text[sp - 1] == ' ':
-          break
-        inc sp
-
-    if colonPos >= 0:
-      # Skip past colon and whitespace to find value
-      var vp = colonPos + 1
-      while vp < lineEnd and text[vp] == ' ': inc vp
-      # Check for block scalar indicators
-      if vp < lineEnd and text[vp] in {'|', '>'}:
-        result.inBlockScalar = true
-        result.blockScalarIndent = indent
-        result.blockScalarType = text[vp]
-
-proc yamlSectionWorker(args: YamlSectionArgs) {.thread.} =
-  ## Tokenize a section of YAML text with given initial state.
-  ## The YAML tokenizer is line-based, so we split the section into lines.
-  var sectionLen = args.endPos - args.startPos
-  var sectionText = newString(sectionLen)
-  if sectionLen > 0:
-    copyMem(addr sectionText[0], addr args.textPtr[args.startPos], sectionLen)
-
-  var tokens: seq[YamlToken]
-  let lines = sectionText.split('\n')
-
-  var inBlockScalar = args.initState.inBlockScalar
-  var blockIndent = args.initState.blockScalarIndent
-  var blockStartLine = -1
-
-  for lineIdx in 0..<lines.len:
-    let lineNum = args.startLine + lineIdx
-    let line = lines[lineIdx]
-    if line.len == 0:
-      if inBlockScalar:
-        inBlockScalar = false
-        blockIndent = -1
-      continue
-
-    var pos = 0
-
-    # Measure leading whitespace
-    var indent = 0
-    while pos < line.len and line[pos] == ' ':
-      inc pos
-      inc indent
-
-    # Block scalar continuation
-    if inBlockScalar:
-      if indent > blockIndent or (pos < line.len and line[pos] == '\n'):
-        # Content line of block scalar
-        if pos < line.len:
-          tokens.add(YamlToken(kind: ytString, line: lineNum, col: pos,
-                               length: line.len - pos))
-        continue
-      else:
-        inBlockScalar = false
-        blockIndent = -1
-
-    if pos >= line.len:
-      continue
-
-    # Document markers --- and ...
-    if indent == 0 and line.len >= 3:
-      if line[0..2] == "---" and (line.len == 3 or line[3] in {' ', '\n', '\r'}):
-        tokens.add(YamlToken(kind: ytType, line: lineNum, col: 0, length: 3))
-        pos = 3
-        while pos < line.len and line[pos] == ' ': inc pos
-        if pos >= line.len:
-          continue
-      elif line[0..2] == "..." and (line.len == 3 or line[3] in {' ', '\n', '\r'}):
-        tokens.add(YamlToken(kind: ytType, line: lineNum, col: 0, length: 3))
-        continue
-
-    # Directives: %YAML, %TAG
-    if indent == 0 and pos < line.len and line[pos] == '%':
-      tokens.add(YamlToken(kind: ytNamespace, line: lineNum, col: pos,
-                           length: line.len - pos))
-      continue
-
-    # Comment line
-    if pos < line.len and line[pos] == '#':
-      tokens.add(YamlToken(kind: ytComment, line: lineNum, col: pos,
-                           length: line.len - pos))
-      continue
-
-    # Sequence indicator -
-    if pos < line.len and line[pos] == '-' and
-       pos + 1 < line.len and line[pos + 1] == ' ':
-      tokens.add(YamlToken(kind: ytOperator, line: lineNum, col: pos, length: 1))
-      pos += 2
-      while pos < line.len and line[pos] == ' ': inc pos
-      if pos >= line.len:
-        continue
-
-    # Check for key: value pattern
-    var colonPos = -1
-    var searchPos = pos
-
-    # Handle quoted keys
-    if searchPos < line.len and line[searchPos] in {'"', '\''}:
-      let quote = line[searchPos]
-      let keyStart = searchPos
-      inc searchPos
-      while searchPos < line.len and line[searchPos] != quote:
-        if line[searchPos] == '\\' and quote == '"':
-          inc searchPos
-        inc searchPos
-      if searchPos < line.len:
-        inc searchPos
-      var sp = searchPos
-      while sp < line.len and line[sp] == ' ': inc sp
-      if sp < line.len and line[sp] == ':' and
-         (sp + 1 >= line.len or line[sp + 1] in {' ', '\n', '\r'}):
-        colonPos = sp
-        tokens.add(YamlToken(kind: ytProperty, line: lineNum, col: keyStart,
-                             length: searchPos - keyStart))
-    else:
-      var sp = searchPos
-      while sp < line.len:
-        if line[sp] == ':' and
-           (sp + 1 >= line.len or line[sp + 1] in {' ', '\n', '\r'}):
-          colonPos = sp
-          break
-        if line[sp] == '#' and sp > 0 and line[sp - 1] == ' ':
-          break
-        inc sp
-
-      if colonPos > pos:
-        var keyEnd = colonPos
-        while keyEnd > pos and line[keyEnd - 1] == ' ':
-          dec keyEnd
-        if keyEnd > pos:
-          tokens.add(YamlToken(kind: ytProperty, line: lineNum, col: pos,
-                               length: keyEnd - pos))
-
-    if colonPos >= 0:
-      tokens.add(YamlToken(kind: ytOperator, line: lineNum, col: colonPos,
-                           length: 1))
-      pos = colonPos + 1
-      while pos < line.len and line[pos] == ' ': inc pos
-
-      if pos >= line.len:
-        continue
-
-      let vc = line[pos]
-
-      if vc == '#':
-        tokens.add(YamlToken(kind: ytComment, line: lineNum, col: pos,
-                             length: line.len - pos))
-        continue
-
-      if vc == '!':
-        let tagStart = pos
-        inc pos
-        while pos < line.len and line[pos] notin {' ', '\n', '\r'}:
-          inc pos
-        tokens.add(YamlToken(kind: ytType, line: lineNum, col: tagStart,
-                             length: pos - tagStart))
-        while pos < line.len and line[pos] == ' ': inc pos
-        if pos >= line.len:
-          continue
-
-      if pos < line.len and line[pos] == '&':
-        let anchorStart = pos
-        inc pos
-        while pos < line.len and line[pos] notin {' ', '\n', '\r', ',', ']', '}'}:
-          inc pos
-        tokens.add(YamlToken(kind: ytAnchor, line: lineNum, col: anchorStart,
-                             length: pos - anchorStart))
-        while pos < line.len and line[pos] == ' ': inc pos
-        if pos >= line.len:
-          continue
-
-      if pos < line.len and line[pos] == '*':
-        let aliasStart = pos
-        inc pos
-        while pos < line.len and line[pos] notin {' ', '\n', '\r', ',', ']', '}'}:
-          inc pos
-        tokens.add(YamlToken(kind: ytAnchor, line: lineNum, col: aliasStart,
-                             length: pos - aliasStart))
-        continue
-
-      # Block scalar indicators | or >
-      if pos < line.len and line[pos] in {'|', '>'}:
-        tokens.add(YamlToken(kind: ytOperator, line: lineNum, col: pos, length: 1))
-        inBlockScalar = true
-        blockIndent = indent
-        blockStartLine = lineNum
-        inc pos
-        while pos < line.len and line[pos] in {'+', '-', '0'..'9'}: inc pos
-        while pos < line.len and line[pos] == ' ': inc pos
-        if pos < line.len and line[pos] == '#':
-          tokens.add(YamlToken(kind: ytComment, line: lineNum, col: pos,
-                               length: line.len - pos))
-        continue
-
-      # Parse the value
-      if pos < line.len:
-        let valStart = pos
-        var valEnd = line.len
-        var inQuote = false
-        var quoteChar = '\0'
-        var vp = pos
-        while vp < line.len:
-          if inQuote:
-            if line[vp] == '\\' and quoteChar == '"':
-              inc vp
-            elif line[vp] == quoteChar:
-              inQuote = false
-          else:
-            if line[vp] in {'"', '\''}:
-              inQuote = true
-              quoteChar = line[vp]
-            elif line[vp] == '#' and vp > 0 and line[vp - 1] == ' ':
-              tokens.add(YamlToken(kind: ytComment, line: lineNum, col: vp,
-                                   length: line.len - vp))
-              valEnd = vp
-              while valEnd > valStart and line[valEnd - 1] == ' ':
-                dec valEnd
-              break
-          inc vp
-
-        if valStart < valEnd:
-          tokenizeValue(tokens, line, lineNum, valStart, valEnd)
-
-    elif colonPos < 0:
-      if pos < line.len:
-        let valStart = pos
-        var valEnd = line.len
-        var vp = pos
-        var inQuote = false
-        var quoteChar = '\0'
-        while vp < line.len:
-          if inQuote:
-            if line[vp] == '\\' and quoteChar == '"':
-              inc vp
-            elif line[vp] == quoteChar:
-              inQuote = false
-          else:
-            if line[vp] in {'"', '\''}:
-              inQuote = true
-              quoteChar = line[vp]
-            elif line[vp] == '#' and vp > 0 and line[vp - 1] == ' ':
-              tokens.add(YamlToken(kind: ytComment, line: lineNum, col: vp,
-                                   length: line.len - vp))
-              valEnd = vp
-              while valEnd > valStart and line[valEnd - 1] == ' ':
-                dec valEnd
-              break
-          inc vp
-
-        if valStart < valEnd:
-          tokenizeValue(tokens, line, lineNum, valStart, valEnd)
-
-  yamlSectionChannels[args.chanIdx].send(tokens)
-
-proc tokenizeYamlParallel(text: string): seq[YamlToken] =
-  if text.len == 0: return @[]
-
-  var lineOffsets: seq[int] = @[0]
-  for i in 0..<text.len:
-    if text[i] == '\n': lineOffsets.add(i + 1)
-  let totalLines = lineOffsets.len
-
-  if totalLines < ParallelLineThreshold:
-    return tokenizeYaml(text)
-
-  let threadCount = min(countProcessors(), MaxTokenThreads)
-  if threadCount <= 1:
-    return tokenizeYaml(text)
-
-  let textPtr = cast[ptr UncheckedArray[char]](unsafeAddr text[0])
-  let linesPerSection = totalLines div threadCount
-
-  # Pre-scan to determine state at each section boundary (sequential, cumulative)
-  var states: seq[YamlTokenizerState] = @[YamlTokenizerState(
-    inBlockScalar: false, blockScalarIndent: -1, blockScalarType: '\0')]
-  for t in 0..<threadCount - 1:
-    let sLine = t * linesPerSection
-    let eLine = (t + 1) * linesPerSection - 1
-    let startPos = lineOffsets[sLine]
-    let endPos = if eLine + 1 < lineOffsets.len: lineOffsets[eLine + 1] else: text.len
-    states.add(preScanYamlState(text, startPos, endPos, states[t]))
-
-  for t in 0..<threadCount:
-    let sLine = t * linesPerSection
-    let eLine = if t == threadCount - 1: totalLines - 1
-                else: (t + 1) * linesPerSection - 1
-    let startPos = lineOffsets[sLine]
-    let endPos = if eLine + 1 < lineOffsets.len: lineOffsets[eLine + 1] else: text.len
-    yamlSectionChannels[t].open()
-    createThread(yamlSectionThreads[t], yamlSectionWorker, YamlSectionArgs(
-      textPtr: textPtr, textLen: text.len,
-      startPos: startPos, endPos: endPos,
-      startLine: sLine, initState: states[t], chanIdx: t
-    ))
-
-  var allTokens: seq[YamlToken] = @[]
-  for t in 0..<threadCount:
-    joinThread(yamlSectionThreads[t])
-    let (hasData, sectionTokens) = yamlSectionChannels[t].tryRecv()
-    if hasData: allTokens.add(sectionTokens)
-    yamlSectionChannels[t].close()
-
-  return allTokens
-
-# ---------------------------------------------------------------------------
 # Range Tokenizer
 # ---------------------------------------------------------------------------
 
 proc tokenizeYamlRange(text: string, startLine, endLine: int): seq[YamlToken] =
-  let allTokens = tokenizeYamlParallel(text)
+  let allTokens = tokenizeYaml(text)
   result = @[]
   for tok in allTokens:
     if tok.line >= startLine and tok.line <= endLine:
@@ -1002,6 +587,17 @@ proc sendResponse(id: JsonNode, resultNode: JsonNode) =
     "id": id,
     "result": resultNode
   })
+
+proc sendTokensResponse(id: JsonNode, data: seq[int]) =
+  ## Send semantic tokens response with direct string building.
+  ## Avoids creating millions of JNode objects for the data array.
+  var body = """{"jsonrpc":"2.0","id":""" & $id & ""","result":{"data":["""
+  for i, v in data:
+    if i > 0: body.add(',')
+    body.addInt(v)
+  body.add("]}}")
+  stdout.write("Content-Length: " & $body.len & "\r\n\r\n" & body)
+  stdout.flushFile()
 
 # ---------------------------------------------------------------------------
 # Main server loop
@@ -1088,12 +684,9 @@ proc main() =
         if doc.uri == uri:
           text = doc.text
           break
-      let tokens = tokenizeYamlParallel(text)
+      let tokens = tokenizeYaml(text)
       let data = encodeSemanticTokens(tokens)
-      var dataJson = newJArray()
-      for v in data:
-        dataJson.add(%v)
-      sendResponse(id, %*{"data": dataJson})
+      sendTokensResponse(id, data)
 
     of "textDocument/semanticTokens/range":
       let params = msg["params"]
@@ -1108,10 +701,7 @@ proc main() =
           break
       let tokens = tokenizeYamlRange(text, startLine, endLine)
       let data = encodeSemanticTokens(tokens)
-      var dataJson = newJArray()
-      for v in data:
-        dataJson.add(%v)
-      sendResponse(id, %*{"data": dataJson})
+      sendTokensResponse(id, data)
 
     of "shutdown":
       sendResponse(id, newJNull())
