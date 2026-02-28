@@ -20,6 +20,10 @@ proc newBuffer*(filePath: string = ""): Buffer =
   result.fullyLoaded = done
   result.modified = false
   result.encoding = encoding
+  if bytesRead > 0 and lines.len > 0:
+    result.estimatedTotalLines = int(totalSize * int64(lines.len) div bytesRead)
+  else:
+    result.estimatedTotalLines = lines.len
 
   if not done:
     startFileLoader(filePath, bytesRead, carry)

@@ -267,12 +267,7 @@ proc render*(state: EditorState) =
       if pct == 100: " LSP:" & activeLspLanguageId
       else: " LSP:" & $pct & "%"
     else: " LSP"
-  let loadingIndicator = if not state.buffer.fullyLoaded and state.buffer.totalSize > 0:
-    let pct = int(state.buffer.loadedBytes * 100 div state.buffer.totalSize)
-    " [Loading " & $pct & "%]"
-  else:
-    ""
-  let leftPart = modeStr & " " & filename & modFlag & loadingIndicator
+  let leftPart = modeStr & " " & filename & modFlag
 
   # Diagnostic counts for status bar
   var errCount, warnCount = 0
@@ -283,7 +278,12 @@ proc render*(state: EditorState) =
     "E:" & $errCount & " W:" & $warnCount & "  "
   else:
     ""
-  let rightPart = lspIndicator & " " & state.buffer.encoding & " " & diagPart & $(state.cursor.line + 1) & "/" & $state.buffer.lineCount & ":" & $(state.cursor.col + 1) & " "
+  let positionPart = if not state.buffer.fullyLoaded and state.buffer.estimatedTotalLines > 0:
+    let loadPct = min(99, state.buffer.lineCount * 100 div state.buffer.estimatedTotalLines)
+    $loadPct & "%:1"
+  else:
+    $(state.cursor.line + 1) & "/" & $state.buffer.lineCount & ":" & $(state.cursor.col + 1)
+  let rightPart = lspIndicator & " " & state.buffer.encoding & " " & diagPart & positionPart & " "
 
   let gap = max(totalWidth - leftPart.len - rightPart.len, 0)
   stdout.write(leftPart & spaces(gap) & rightPart)

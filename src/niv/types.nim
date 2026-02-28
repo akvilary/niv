@@ -67,6 +67,7 @@ type
     totalSize*: int64        ## File size in bytes
     loadedBytes*: int64      ## Bytes loaded so far
     encoding*: string        ## Detected file encoding
+    estimatedTotalLines*: int ## Estimated from first chunk
 
   Viewport* = object
     topLine*: int
