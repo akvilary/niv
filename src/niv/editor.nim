@@ -1,6 +1,6 @@
 ## Editor: main loop and state management
 
-import std/[strutils, json]
+import std/[strutils, json, osproc]
 import types
 import buffer
 import terminal
@@ -20,6 +20,34 @@ import highlight
 import fileio
 import jumplist
 
+proc updateGitInfo(state: var EditorState) =
+  try:
+    let (branchOut, branchCode) = execCmdEx("git rev-parse --abbrev-ref HEAD", options = {poUsePath})
+    if branchCode == 0:
+      state.gitBranch = branchOut.strip()
+      let (diffOut, diffCode) = execCmdEx("git diff --numstat", options = {poUsePath})
+      if diffCode == 0:
+        var added, deleted = 0
+        for line in diffOut.splitLines():
+          if line.len == 0: continue
+          let parts = line.split('\t')
+          if parts.len >= 2:
+            try:
+              added += parseInt(parts[0])
+              deleted += parseInt(parts[1])
+            except ValueError:
+              discard
+        if added > 0 or deleted > 0:
+          state.gitDiffStat = "+" & $added & " -" & $deleted
+        else:
+          state.gitDiffStat = ""
+    else:
+      state.gitBranch = ""
+      state.gitDiffStat = ""
+  except OSError:
+    state.gitBranch = ""
+    state.gitDiffStat = ""
+
 proc newEditorState*(filePath: string = ""): EditorState =
   result.buffer = newBuffer(filePath)
   result.cursor = Position(line: 0, col: 0)
@@ -27,6 +55,7 @@ proc newEditorState*(filePath: string = ""): EditorState =
   result.running = true
   result.sidebar = initSidebar()
   initLspManager()
+  updateGitInfo(result)
   if filePath.len > 0:
     tryAutoStartLsp(filePath)
 
@@ -98,12 +127,8 @@ proc handleLspEvents(state: var EditorState): bool =
           if lspHasSemanticTokensRange and tokenLegend.len > 0:
             requestViewportRangeTokens(state)
             startBgHighlight(state.buffer.lineCount)
-          if tokenLegend.len > 0:
-            state.statusMessage = "LSP ready (semantic tokens: " & $tokenLegend.len & " types)"
-          else:
-            state.statusMessage = "LSP ready (no semantic tokens support)"
         else:
-          state.statusMessage = "LSP ready"
+          discard
       of "shutdown":
         lspSendExit()
       of "textDocument/definition":

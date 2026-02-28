@@ -295,6 +295,14 @@ proc render*(state: EditorState) =
     stdout.write(":" & state.commandLine)
   elif state.statusMessage.len > 0:
     stdout.write(state.statusMessage)
+  else:
+    if state.gitBranch.len > 0:
+      let gitLabel = " GIT "
+      let pad = max(modeStr.len + 1 - gitLabel.len, 1)
+      let branchLeft = gitLabel & spaces(pad) & state.gitBranch
+      let diffRight = if state.gitDiffStat.len > 0: state.gitDiffStat & " " else: ""
+      let cmdGap = max(totalWidth - branchLeft.len - diffRight.len, 0)
+      stdout.write(branchLeft & spaces(cmdGap) & diffRight)
 
   # Modal overlays
   if state.mode == mLspManager:

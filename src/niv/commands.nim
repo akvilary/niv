@@ -1,6 +1,6 @@
 ## Ex-command parsing and execution
 
-import std/strutils
+import std/[strutils, osproc]
 import types
 import buffer
 import fileio
@@ -44,6 +44,32 @@ proc parseCommand*(input: string): (ExCommand, string) =
   else:
     return (ecUnknown, trimmed)
 
+proc updateGitDiffStat(state: var EditorState) =
+  if state.gitBranch.len == 0:
+    state.gitDiffStat = ""
+    return
+  try:
+    let (diffOut, diffCode) = execCmdEx("git diff --numstat", options = {poUsePath})
+    if diffCode == 0:
+      var added, deleted = 0
+      for line in diffOut.splitLines():
+        if line.len == 0: continue
+        let parts = line.split('\t')
+        if parts.len >= 2:
+          try:
+            added += parseInt(parts[0])
+            deleted += parseInt(parts[1])
+          except ValueError:
+            discard
+      if added > 0 or deleted > 0:
+        state.gitDiffStat = "+" & $added & " -" & $deleted
+      else:
+        state.gitDiffStat = ""
+    else:
+      state.gitDiffStat = ""
+  except OSError:
+    state.gitDiffStat = ""
+
 proc executeCommand*(state: var EditorState, cmd: ExCommand, arg: string) =
   case cmd
   of ecWrite:
@@ -56,6 +82,7 @@ proc executeCommand*(state: var EditorState, cmd: ExCommand, arg: string) =
     saveFile(path, state.buffer.lines)
     state.buffer.modified = false
     state.statusMessage = "\"" & path & "\" written"
+    updateGitDiffStat(state)
 
   of ecQuit:
     if state.buffer.modified:
@@ -70,6 +97,7 @@ proc executeCommand*(state: var EditorState, cmd: ExCommand, arg: string) =
       return
     saveFile(path, state.buffer.lines)
     state.buffer.modified = false
+    updateGitDiffStat(state)
     state.running = false
 
   of ecForceQuit:

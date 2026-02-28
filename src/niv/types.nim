@@ -108,6 +108,8 @@ type
     yankIsLinewise*: bool
     pendingKeys*: string
     sidebar*: SidebarState
+    gitBranch*: string
+    gitDiffStat*: string
 
 proc noKey*(): InputKey =
   InputKey(kind: kkNone)
