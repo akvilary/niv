@@ -1,6 +1,6 @@
 ## Screen rendering pipeline
 
-import std/strutils
+import std/[strutils, os]
 import types
 import buffer
 import terminal
@@ -253,7 +253,7 @@ proc render*(state: EditorState) =
     of mLspManager: " LSP "
 
   let filename = if state.buffer.filePath.len > 0:
-    state.buffer.filePath
+    extractFilename(state.buffer.filePath)
   else:
     "[No Name]"
 
@@ -271,7 +271,7 @@ proc render*(state: EditorState) =
     " [Loading " & $pct & "%]"
   else:
     ""
-  let leftPart = modeStr & " " & filename & modFlag & lspIndicator & loadingIndicator
+  let leftPart = modeStr & " " & filename & modFlag & loadingIndicator
 
   # Diagnostic counts for status bar
   var errCount, warnCount = 0
@@ -282,7 +282,7 @@ proc render*(state: EditorState) =
     "E:" & $errCount & " W:" & $warnCount & "  "
   else:
     ""
-  let rightPart = diagPart & $(state.cursor.line + 1) & ":" & $(state.cursor.col + 1) & " "
+  let rightPart = lspIndicator & " " & state.buffer.encoding & " " & diagPart & $(state.cursor.line + 1) & ":" & $(state.cursor.col + 1) & " "
 
   let gap = max(totalWidth - leftPart.len - rightPart.len, 0)
   stdout.write(leftPart & spaces(gap) & rightPart)

@@ -10,14 +10,16 @@ proc newBuffer*(filePath: string = ""): Buffer =
     result.lines = @[""]
     result.fullyLoaded = true
     result.modified = false
+    result.encoding = "UTF-8"
     return
 
-  let (lines, bytesRead, totalSize, done, carry) = loadFileFirstChunk(filePath)
+  let (lines, bytesRead, totalSize, done, carry, encoding) = loadFileFirstChunk(filePath)
   result.lines = lines
   result.totalSize = totalSize
   result.loadedBytes = bytesRead
   result.fullyLoaded = done
   result.modified = false
+  result.encoding = encoding
 
   if not done:
     startFileLoader(filePath, bytesRead, carry)

@@ -66,6 +66,7 @@ type
     fullyLoaded*: bool       ## Whole file loaded?
     totalSize*: int64        ## File size in bytes
     loadedBytes*: int64      ## Bytes loaded so far
+    encoding*: string        ## Detected file encoding
 
   Viewport* = object
     topLine*: int

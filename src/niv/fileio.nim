@@ -289,29 +289,67 @@ proc fileLoaderWorker(args: tuple[path: string, startOffset: int64, initialCarry
 
     discard posix.close(fd)
 
-proc loadFileFirstChunk*(filePath: string): tuple[lines: seq[string], bytesRead: int64, totalSize: int64, done: bool, carry: string] =
+proc detectEncoding*(data: openArray[char]): string =
+  ## Detect file encoding from raw bytes. Checks BOM first, then validates UTF-8.
+  let n = data.len
+  if n == 0: return "UTF-8"
+  # BOM detection
+  if n >= 3 and data[0] == '\xEF' and data[1] == '\xBB' and data[2] == '\xBF':
+    return "UTF-8 BOM"
+  if n >= 2:
+    if data[0] == '\xFF' and data[1] == '\xFE':
+      if n >= 4 and data[2] == '\x00' and data[3] == '\x00': return "UTF-32 LE"
+      return "UTF-16 LE"
+    if data[0] == '\xFE' and data[1] == '\xFF':
+      return "UTF-16 BE"
+    if n >= 4 and data[0] == '\x00' and data[1] == '\x00' and data[2] == '\xFE' and data[3] == '\xFF':
+      return "UTF-32 BE"
+  # UTF-8 validation
+  var hasMultibyte = false
+  var i = 0
+  while i < n:
+    let b = byte(data[i])
+    if b < 0x80:
+      inc i
+    elif (b and 0xE0) == 0xC0:
+      if i + 1 >= n or (byte(data[i+1]) and 0xC0) != 0x80: return "Latin-1"
+      hasMultibyte = true; i += 2
+    elif (b and 0xF0) == 0xE0:
+      if i + 2 >= n or (byte(data[i+1]) and 0xC0) != 0x80 or (byte(data[i+2]) and 0xC0) != 0x80: return "Latin-1"
+      hasMultibyte = true; i += 3
+    elif (b and 0xF8) == 0xF0:
+      if i + 3 >= n or (byte(data[i+1]) and 0xC0) != 0x80 or (byte(data[i+2]) and 0xC0) != 0x80 or (byte(data[i+3]) and 0xC0) != 0x80: return "Latin-1"
+      hasMultibyte = true; i += 4
+    else:
+      return "Latin-1"
+  if hasMultibyte: return "UTF-8"
+  return "ASCII"
+
+proc loadFileFirstChunk*(filePath: string): tuple[lines: seq[string], bytesRead: int64, totalSize: int64, done: bool, carry: string, encoding: string] =
   ## Load the first chunk of a file synchronously. Returns the lines,
-  ## bytes read, total file size, whether the whole file was loaded, and
-  ## any carry (partial line at end) for the background loader.
+  ## bytes read, total file size, whether the whole file was loaded,
+  ## carry (partial line at end) for the background loader, and detected encoding.
   if filePath.len == 0 or not fileExists(filePath):
-    return (lines: @[""], bytesRead: 0'i64, totalSize: 0'i64, done: true, carry: "")
+    return (lines: @[""], bytesRead: 0'i64, totalSize: 0'i64, done: true, carry: "", encoding: "UTF-8")
 
   let totalSize = getFileSize(filePath)
   if totalSize == 0:
-    return (lines: @[""], bytesRead: 0'i64, totalSize: 0'i64, done: true, carry: "")
+    return (lines: @[""], bytesRead: 0'i64, totalSize: 0'i64, done: true, carry: "", encoding: "UTF-8")
 
   let fd = posix.open(cstring(filePath), O_RDONLY)
   if fd < 0:
-    return (lines: @[""], bytesRead: 0'i64, totalSize: totalSize, done: true, carry: "")
+    return (lines: @[""], bytesRead: 0'i64, totalSize: totalSize, done: true, carry: "", encoding: "UTF-8")
 
   var buf = newString(ChunkSize)
   let n = posix.read(fd, addr buf[0], ChunkSize)
   discard posix.close(fd)
 
   if n <= 0:
-    return (lines: @[""], bytesRead: 0'i64, totalSize: totalSize, done: true, carry: "")
+    return (lines: @[""], bytesRead: 0'i64, totalSize: totalSize, done: true, carry: "", encoding: "UTF-8")
 
   buf.setLen(n)
+
+  let encoding = detectEncoding(buf)
 
   var lines: seq[string] = @[]
   var carry = ""
@@ -331,7 +369,7 @@ proc loadFileFirstChunk*(filePath: string): tuple[lines: seq[string], bytesRead:
   if lines.len == 0:
     lines = @[""]
 
-  return (lines: lines, bytesRead: int64(n), totalSize: totalSize, done: done, carry: carry)
+  return (lines: lines, bytesRead: int64(n), totalSize: totalSize, done: done, carry: carry, encoding: encoding)
 
 proc stopFileLoader*() =
   ## Signal the background file loader to stop and drain the channel.
