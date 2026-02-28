@@ -234,47 +234,50 @@ proc handleLspEvents(state: var EditorState): bool =
       resetBgHighlight()
       lspSyncedLines = 0
 
+var pendingFullLspSync = false
+const LspSyncChunkSize = 50_000  ## lines per tick (~3ms)
+var lspSyncBuf: string
+var lspSyncIdx: int
+
+const MaxLinesPerPoll = 200_000  ## max lines to process per tick
+
 proc handleFileLoaderEvents(state: var EditorState): bool =
   ## Poll and process file loader chunks. Returns true if lines were added.
   result = false
   if state.buffer.fullyLoaded:
     return
 
-  while true:
-    let (hasData, chunk) = pollFileLoader()
-    if not hasData:
+  var linesProcessed = 0
+  while linesProcessed < MaxLinesPerPoll:
+    var pollResult = pollFileLoader()
+    if not pollResult[0]:
       break
+    var chunk = move pollResult[1]
     result = true
     case chunk.kind
     of fckLines:
-      if chunk.lines.len > 0:
+      let linesPtr = chunk.lines
+      if linesPtr != nil and linesPtr[].len > 0:
         let oldLen = state.buffer.lines.len
-        state.buffer.lines.setLen(oldLen + chunk.lines.len)
-        for i in 0..<chunk.lines.len:
-          state.buffer.lines[oldLen + i] = chunk.lines[i]
+        state.buffer.lines.setLen(oldLen + linesPtr[].len)
+        for i in 0..<linesPtr[].len:
+          state.buffer.lines[oldLen + i] = move linesPtr[][i]
+        linesProcessed += linesPtr[].len
       state.buffer.loadedBytes += chunk.bytesRead
-      # Progressive LSP sync to viewport
-      if lspState == lsRunning and lspSyncedLines > 0:
-        let viewEnd = state.viewport.topLine + state.viewport.height
-        if state.buffer.lineCount > lspSyncedLines and lspSyncedLines < viewEnd:
-          syncLspToLine(state, min(state.buffer.lineCount, viewEnd + 100))
+      freeFileChunkLines(chunk)
     of fckDone:
       state.buffer.fullyLoaded = true
       # Remove trailing empty line if file ends with newline
       if state.buffer.lines.len > 1 and state.buffer.lines[^1].len == 0:
         state.buffer.lines.setLen(state.buffer.lines.len - 1)
-      # Sync full text with LSP and extend background highlighting
+      # Defer expensive full LSP sync to idle time
       if lspState == lsRunning and state.buffer.filePath.len > 0 and
          state.buffer.lineCount > lspSyncedLines:
-        let text = state.buffer.lines.join("\n")
-        sendDidChange(text)
-        lspSyncedLines = state.buffer.lineCount
+        pendingFullLspSync = true
       if lspHasSemanticTokensRange and lspState == lsRunning and tokenLegend.len > 0:
         if bgHighlightNextLine >= 0:
-          # Still running — extend to cover full file
           bgHighlightTotalLines = state.buffer.lineCount
         elif bgHighlightTotalLines < state.buffer.lineCount:
-          # Finished initial pass — continue from where we left off
           startBgHighlight(state.buffer.lineCount, bgHighlightTotalLines)
 
 proc run*(state: var EditorState) =
@@ -319,10 +322,59 @@ proc run*(state: var EditorState) =
       render(state)
       needsRedraw = false
 
-    # Poll file loader events (non-blocking)
+    # Read input first — cursor movement is never blocked by loading
+    let key = readKey()
+    if key.kind != kkNone:
+      needsRedraw = true
+
+      # Dispatch to mode handler
+      case state.mode
+      of mNormal:
+        handleNormalMode(state, key)
+      of mInsert:
+        handleInsertMode(state, key)
+      of mCommand:
+        handleCommandMode(state, key)
+      of mExplore:
+        handleExploreMode(state, key)
+      of mLspManager:
+        handleLspManagerMode(state, key)
+
+      # Pause/resume file loader on insert mode transitions
+      if state.mode != prevMode:
+        if state.mode == mInsert and not state.buffer.fullyLoaded:
+          pauseFileLoader()
+        elif prevMode == mInsert and not state.buffer.fullyLoaded:
+          resumeFileLoader()
+        prevMode = state.mode
+
+      # Render input result immediately — cursor visible before file events
+      adjustViewport(state.viewport, state.cursor, state.buffer.lineCount)
+      if state.sidebar.visible:
+        adjustSidebarScroll(state.sidebar, state.viewport.height)
+      render(state)
+      needsRedraw = false
+
+    # Poll file loader events (non-blocking, after input render)
     let hadFileEvents = handleFileLoaderEvents(state)
     if hadFileEvents:
       needsRedraw = true
+
+    # Incremental LSP sync — join ~50K lines per tick to avoid blocking cursor
+    if pendingFullLspSync:
+      let endIdx = min(lspSyncIdx + LspSyncChunkSize, state.buffer.lineCount)
+      for i in lspSyncIdx..<endIdx:
+        if lspSyncBuf.len > 0:
+          lspSyncBuf.add('\n')
+        lspSyncBuf.add(state.buffer.lines[i])
+      lspSyncIdx = endIdx
+      if lspSyncIdx >= state.buffer.lineCount:
+        sendDidChange(lspSyncBuf)
+        lspSyncedLines = state.buffer.lineCount
+        lspSyncBuf = ""
+        lspSyncIdx = 0
+        pendingFullLspSync = false
+        needsRedraw = true
 
     # Poll LSP events (non-blocking)
     let hadLspEvents = handleLspEvents(state)
@@ -336,31 +388,3 @@ proc run*(state: var EditorState) =
     let lspProgress = pollInstallProgress()
     if lspProgress:
       needsRedraw = true
-
-    # Read input (100ms timeout via VTIME=1)
-    let key = readKey()
-    if key.kind == kkNone:
-      continue
-
-    needsRedraw = true
-
-    # Dispatch to mode handler
-    case state.mode
-    of mNormal:
-      handleNormalMode(state, key)
-    of mInsert:
-      handleInsertMode(state, key)
-    of mCommand:
-      handleCommandMode(state, key)
-    of mExplore:
-      handleExploreMode(state, key)
-    of mLspManager:
-      handleLspManagerMode(state, key)
-
-    # Pause/resume file loader on insert mode transitions
-    if state.mode != prevMode:
-      if state.mode == mInsert and not state.buffer.fullyLoaded:
-        pauseFileLoader()
-      elif prevMode == mInsert and not state.buffer.fullyLoaded:
-        resumeFileLoader()
-      prevMode = state.mode

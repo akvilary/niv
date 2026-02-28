@@ -16,7 +16,7 @@ type
   FileChunk* = object
     case kind*: FileChunkKind
     of fckLines:
-      lines*: seq[string]
+      lines*: ptr seq[string]
       bytesRead*: int64
     of fckDone:
       discard
@@ -26,6 +26,18 @@ type
     startPos: int
     endPos: int   ## exclusive
     chanIdx: int
+
+proc newFileChunkLines*(lines: sink seq[string], bytesRead: int64): FileChunk =
+  ## Allocate lines on the shared heap and wrap in FileChunk.
+  let p = createShared(seq[string])
+  p[] = move lines
+  FileChunk(kind: fckLines, lines: p, bytesRead: bytesRead)
+
+proc freeFileChunkLines*(chunk: FileChunk) =
+  ## Free lines allocated by newFileChunkLines.
+  if chunk.kind == fckLines and chunk.lines != nil:
+    reset(chunk.lines[])
+    deallocShared(chunk.lines)
 
 var fileLoaderChannel*: Channel[FileChunk]
 var fileLoaderThread: Thread[tuple[path: string, startOffset: int64, initialCarry: string, remainingSize: int64]]
@@ -168,9 +180,10 @@ proc fileLoaderWorker(args: tuple[path: string, startOffset: int64, initialCarry
     let threadCount = min(countProcessors(), MaxParseThreads)
 
     if threadCount <= 1 or actualBufLen < ParallelThreshold:
-      # Single-thread parse of the full buffer
-      var lines: seq[string] = @[]
+      # Single-thread parse, sending lines in batches
+      var batch: seq[string] = @[]
       var pos = 0
+      var bytesSent = false
       while pos < actualBufLen:
         var nlPos = pos
         while nlPos < actualBufLen and buf[nlPos] != byte('\n'):
@@ -181,24 +194,21 @@ proc fileLoaderWorker(args: tuple[path: string, startOffset: int64, initialCarry
         var line = newString(lineLen)
         if lineLen > 0:
           copyMem(addr line[0], addr buf[pos], lineLen)
-        lines.add(line)
+        batch.add(line)
         pos = nlPos + 1
-      # Handle case where buffer doesn't end with \n (last line without newline)
-      if actualBufLen > 0 and buf[actualBufLen - 1] != byte('\n'):
-        discard  # already handled by the loop above
+        if batch.len >= BatchSize:
+          if fileLoaderCancel.load():
+            dealloc(buf)
+            fileLoaderChannel.send(FileChunk(kind: fckDone))
+            return
+          let bytes = if not bytesSent: totalBytesRead else: 0'i64
+          bytesSent = true
+          fileLoaderChannel.send(newFileChunkLines(move batch, bytes))
+          batch = @[]
       dealloc(buf)
-
-      # Send lines in batches
-      var i = 0
-      while i < lines.len:
-        if fileLoaderCancel.load():
-          fileLoaderChannel.send(FileChunk(kind: fckDone))
-          return
-        let batchEnd = min(i + BatchSize, lines.len)
-        let bytesForBatch = if i == 0: totalBytesRead else: 0'i64
-        fileLoaderChannel.send(FileChunk(kind: fckLines,
-          lines: lines[i..<batchEnd], bytesRead: bytesForBatch))
-        i = batchEnd
+      if batch.len > 0:
+        fileLoaderChannel.send(newFileChunkLines(move batch,
+          if not bytesSent: totalBytesRead else: 0'i64))
       fileLoaderChannel.send(FileChunk(kind: fckDone))
       return
 
@@ -219,30 +229,29 @@ proc fileLoaderWorker(args: tuple[path: string, startOffset: int64, initialCarry
     for t in 0..<threadCount:
       joinThread(parseThreads[t])
 
-    # Collect results in order and send to main thread
+    # Collect results from all threads and send in batches
+    dealloc(buf)
+    var bytesSent = false
     for t in 0..<threadCount:
-      let (hasData, sectionLines) = parseResultChannels[t].tryRecv()
-      if hasData and sectionLines.len > 0:
-        # Send in batches
-        var i = 0
-        while i < sectionLines.len:
+      var recvResult = parseResultChannels[t].tryRecv()
+      if recvResult[0] and recvResult[1].len > 0:
+        var sent = 0
+        while sent < recvResult[1].len:
           if fileLoaderCancel.load():
-            # Drain remaining channels
-            for t2 in t+1..<threadCount:
+            for t2 in (t+1)..<threadCount:
               discard parseResultChannels[t2].tryRecv()
-            for tt in 0..<threadCount:
-              parseResultChannels[tt].close()
-            dealloc(buf)
+              parseResultChannels[t2].close()
             fileLoaderChannel.send(FileChunk(kind: fckDone))
             return
-          let batchEnd = min(i + BatchSize, sectionLines.len)
-          let bytesForBatch = if t == 0 and i == 0: totalBytesRead else: 0'i64
-          fileLoaderChannel.send(FileChunk(kind: fckLines,
-            lines: sectionLines[i..<batchEnd], bytesRead: bytesForBatch))
-          i = batchEnd
+          let batchEnd = min(sent + BatchSize, recvResult[1].len)
+          var batch = newSeq[string](batchEnd - sent)
+          for i in 0..<batch.len:
+            batch[i] = move recvResult[1][sent + i]
+          let bytes = if not bytesSent: totalBytesRead else: 0'i64
+          bytesSent = true
+          fileLoaderChannel.send(newFileChunkLines(move batch, bytes))
+          sent = batchEnd
       parseResultChannels[t].close()
-
-    dealloc(buf)
     fileLoaderChannel.send(FileChunk(kind: fckDone))
 
   else:
@@ -265,7 +274,7 @@ proc fileLoaderWorker(args: tuple[path: string, startOffset: int64, initialCarry
       let n = posix.read(fd, addr buf[0], ChunkSize)
       if n <= 0:
         if carry.len > 0:
-          fileLoaderChannel.send(FileChunk(kind: fckLines, lines: @[carry], bytesRead: 0))
+          fileLoaderChannel.send(newFileChunkLines(@[carry], 0))
         fileLoaderChannel.send(FileChunk(kind: fckDone))
         break
 
@@ -274,9 +283,9 @@ proc fileLoaderWorker(args: tuple[path: string, startOffset: int64, initialCarry
       buf.setLen(ChunkSize)
 
       if lines.len > 0:
-        fileLoaderChannel.send(FileChunk(kind: fckLines, lines: lines, bytesRead: int64(n)))
+        fileLoaderChannel.send(newFileChunkLines(lines, int64(n)))
       else:
-        fileLoaderChannel.send(FileChunk(kind: fckLines, lines: @[], bytesRead: int64(n)))
+        fileLoaderChannel.send(newFileChunkLines(@[], int64(n)))
 
     discard posix.close(fd)
 
@@ -331,9 +340,11 @@ proc stopFileLoader*() =
   fileLoaderCancel.store(true)
   while true:
     let (hasData, chunk) = fileLoaderChannel.tryRecv()
-    if hasData and chunk.kind == fckDone:
-      break
-    elif not hasData:
+    if hasData:
+      freeFileChunkLines(chunk)
+      if chunk.kind == fckDone:
+        break
+    else:
       os.sleep(1)
   fileLoaderActive = false
   fileLoaderCancel.store(false)

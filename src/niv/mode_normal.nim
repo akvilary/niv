@@ -44,6 +44,14 @@ proc handleNormalMode*(state: var EditorState, key: InputKey) =
   if not ir.complete:
     return
 
+  # Block editing operations while file is loading — cursor movement always works
+  const loadingBlocked = {akInsertBefore, akInsertAfter, akInsertLineBelow,
+    akInsertLineAbove, akDeleteChar, akDeleteLine, akPaste, akPasteBefore,
+    akUndo, akRedo, akGotoDefinition}
+  if ir.action in loadingBlocked and not state.buffer.fullyLoaded:
+    state.statusMessage = "File still loading..."
+    return
+
   case ir.action
   # Movement
   of akMoveLeft:
@@ -173,9 +181,7 @@ proc handleNormalMode*(state: var EditorState, key: InputKey) =
     state.cursor = clampCursor(state.buffer, pos, mNormal)
 
   of akGotoDefinition:
-    if not state.buffer.fullyLoaded:
-      state.statusMessage = "File still loading..."
-    elif lspState == lsRunning and lspDocumentUri.len > 0:
+    if lspState == lsRunning and lspDocumentUri.len > 0:
       let id = nextLspId()
       sendToLsp(buildDefinition(id, lspDocumentUri, state.cursor.line, state.cursor.col))
       addPendingRequest(id, "textDocument/definition")
