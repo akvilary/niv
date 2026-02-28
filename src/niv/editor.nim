@@ -245,8 +245,10 @@ proc handleFileLoaderEvents(state: var EditorState): bool =
     case chunk.kind
     of fckLines:
       if chunk.lines.len > 0:
-        for line in chunk.lines:
-          state.buffer.lines.add(line)
+        let oldLen = state.buffer.lines.len
+        state.buffer.lines.setLen(oldLen + chunk.lines.len)
+        for i in 0..<chunk.lines.len:
+          state.buffer.lines[oldLen + i] = chunk.lines[i]
       state.buffer.loadedBytes += chunk.bytesRead
       # Progressive LSP sync to viewport
       if lspState == lsRunning and lspSyncedLines > 0:

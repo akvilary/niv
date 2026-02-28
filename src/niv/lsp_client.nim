@@ -33,7 +33,7 @@ var lastRangeTopLine*: int = -1
 var lastRangeEndLine*: int = -1
 
 # Background progressive highlighting state
-const BgHighlightChunkSize* = 1000
+const BgHighlightChunkSize* = 5000
 var bgHighlightNextLine*: int = -1
 var bgHighlightTotalLines*: int = 0
 var bgHighlightRequestId*: int = -1

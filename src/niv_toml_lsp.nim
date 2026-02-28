@@ -1,7 +1,7 @@
 ## niv_toml_lsp — minimal TOML Language Server with semantic tokens
 ## Communicates via stdin/stdout using JSON-RPC 2.0 with Content-Length framing
 
-import std/[json, strutils, os, posix]
+import std/[json, strutils, os, posix, cpuinfo]
 
 # ---------------------------------------------------------------------------
 # Types
@@ -440,12 +440,508 @@ proc tokenizeToml(text: string): seq[TomlToken] =
   return tokens
 
 # ---------------------------------------------------------------------------
+# Parallel Tokenizer
+# ---------------------------------------------------------------------------
+
+const
+  MaxTokenThreads = 4
+  ParallelLineThreshold = 4000
+
+type
+  TomlTokenizerState = object
+    inMultiBasic: bool
+    inMultiLiteral: bool
+
+  TomlSectionArgs = object
+    textPtr: ptr UncheckedArray[char]
+    textLen: int
+    startPos: int
+    endPos: int
+    startLine: int
+    initState: TomlTokenizerState
+    chanIdx: int
+
+var tomlSectionChannels: array[MaxTokenThreads, Channel[seq[TomlToken]]]
+var tomlSectionThreads: array[MaxTokenThreads, Thread[TomlSectionArgs]]
+
+proc preScanTomlState(text: string, startPos, endPos: int, initState: TomlTokenizerState): TomlTokenizerState =
+  ## Lightweight pre-scan tracking only cross-line state variables.
+  result = initState
+  var pos = startPos
+  while pos < endPos:
+    if result.inMultiBasic:
+      # Inside """...""", scan for closing """
+      if pos + 2 < endPos and text[pos] == '"' and text[pos+1] == '"' and text[pos+2] == '"':
+        result.inMultiBasic = false
+        pos += 3
+      else:
+        inc pos
+      continue
+    if result.inMultiLiteral:
+      # Inside '''...''', scan for closing '''
+      if pos + 2 < endPos and text[pos] == '\'' and text[pos+1] == '\'' and text[pos+2] == '\'':
+        result.inMultiLiteral = false
+        pos += 3
+      else:
+        inc pos
+      continue
+    # Skip comments
+    if text[pos] == '#':
+      while pos < endPos and text[pos] != '\n':
+        inc pos
+      continue
+    # Multi-line basic string """
+    if pos + 2 < endPos and text[pos] == '"' and text[pos+1] == '"' and text[pos+2] == '"':
+      result.inMultiBasic = true
+      pos += 3
+      continue
+    # Multi-line literal string '''
+    if pos + 2 < endPos and text[pos] == '\'' and text[pos+1] == '\'' and text[pos+2] == '\'':
+      result.inMultiLiteral = true
+      pos += 3
+      continue
+    # Single-line basic string "..."
+    if text[pos] == '"':
+      inc pos
+      while pos < endPos and text[pos] != '"' and text[pos] != '\n':
+        if text[pos] == '\\' and pos + 1 < endPos: inc pos
+        inc pos
+      if pos < endPos and text[pos] == '"': inc pos
+      continue
+    # Single-line literal string '...'
+    if text[pos] == '\'':
+      inc pos
+      while pos < endPos and text[pos] != '\'' and text[pos] != '\n':
+        inc pos
+      if pos < endPos and text[pos] == '\'': inc pos
+      continue
+    inc pos
+
+proc tomlSectionWorker(args: TomlSectionArgs) {.thread.} =
+  ## Tokenize a section of TOML text with given initial state.
+  var sectionLen = args.endPos - args.startPos
+  var sectionText = newString(sectionLen)
+  if sectionLen > 0:
+    copyMem(addr sectionText[0], addr args.textPtr[args.startPos], sectionLen)
+
+  var tokens: seq[TomlToken]
+  var pos = 0
+  var line = args.startLine
+  var col = 0
+
+  template ch(): char =
+    if pos < sectionText.len: sectionText[pos] else: '\0'
+
+  template peek(offset: int): char =
+    if pos + offset < sectionText.len: sectionText[pos + offset] else: '\0'
+
+  template advance() =
+    if pos < sectionText.len:
+      if sectionText[pos] == '\n':
+        inc line; col = 0
+      else:
+        inc col
+      inc pos
+
+  template skipWhitespace() =
+    while pos < sectionText.len and sectionText[pos] in {' ', '\t', '\r'}:
+      advance()
+
+  proc emitMultiLineFromText(tokens: var seq[TomlToken], kind: TomlTokenKind,
+                             text: string, startPos, endPos, startLine, startCol: int) =
+    var ln = startLine
+    var lineStart = startPos
+    for i in startPos..<endPos:
+      if text[i] == '\n':
+        let actualCol = if ln == startLine: startCol else: 0
+        let actualLen = if ln == startLine: i - lineStart else: i - lineStart
+        if actualLen > 0:
+          tokens.add(TomlToken(kind: kind, line: ln, col: actualCol, length: actualLen))
+        inc ln
+        lineStart = i + 1
+    let remaining = endPos - lineStart
+    let actualCol = if ln == startLine: startCol else: 0
+    if remaining > 0:
+      tokens.add(TomlToken(kind: kind, line: ln, col: actualCol, length: remaining))
+
+  # Handle initial state: if starting inside a multi-line string, scan for closing delimiter first
+  if args.initState.inMultiBasic:
+    let sLine = line
+    let sCol = col
+    let sPos = pos
+    while pos < sectionText.len:
+      if sectionText[pos] == '"' and peek(1) == '"' and peek(2) == '"':
+        advance(); advance(); advance()
+        break
+      advance()
+    emitMultiLineFromText(tokens, ttString, sectionText, sPos, pos, sLine, sCol)
+
+  if args.initState.inMultiLiteral:
+    let sLine = line
+    let sCol = col
+    let sPos = pos
+    while pos < sectionText.len:
+      if sectionText[pos] == '\'' and peek(1) == '\'' and peek(2) == '\'':
+        advance(); advance(); advance()
+        break
+      advance()
+    emitMultiLineFromText(tokens, ttString, sectionText, sPos, pos, sLine, sCol)
+
+  # Normal tokenization loop (replicates tokenizeToml logic)
+  while pos < sectionText.len:
+    skipWhitespace()
+    if pos >= sectionText.len: break
+
+    let c = ch()
+
+    if c == '\n':
+      advance()
+      continue
+
+    # Comment
+    if c == '#':
+      let sLine = line
+      let sCol = col
+      let sPos = pos
+      while pos < sectionText.len and sectionText[pos] != '\n':
+        advance()
+      tokens.add(TomlToken(kind: ttComment, line: sLine, col: sCol,
+                           length: pos - sPos))
+      continue
+
+    # Table headers: [name] or [[name]]
+    if c == '[':
+      let sCol = col
+      let isArray = peek(1) == '['
+      if isArray:
+        advance(); advance()
+      else:
+        advance()
+      skipWhitespace()
+      let nameStart = pos
+      let nameCol = col
+      let nameLine = line
+      while pos < sectionText.len and sectionText[pos] notin {']', '\n', '#'}:
+        advance()
+      let nameEnd = pos
+      var trimEnd = nameEnd
+      while trimEnd > nameStart and sectionText[trimEnd - 1] in {' ', '\t'}:
+        dec trimEnd
+      if trimEnd > nameStart:
+        tokens.add(TomlToken(kind: ttType, line: nameLine, col: nameCol,
+                             length: trimEnd - nameStart))
+      if pos < sectionText.len and sectionText[pos] == ']':
+        advance()
+      if isArray and pos < sectionText.len and sectionText[pos] == ']':
+        advance()
+      continue
+
+    # Key = Value pairs
+    if isBareKeyChar(c) or c == '"' or c == '\'':
+      let keyStartPos = pos
+      let keyStartCol = col
+      let keyStartLine = line
+
+      var isKey = false
+      var keyParts: seq[(int, int, int)] # (col, length, pos)
+      var dotPositions: seq[(int, int)]  # (line, col)
+
+      let savedPos = pos
+      let savedLine = line
+      let savedCol = col
+
+      block parseKey:
+        while true:
+          let partCol = col
+          let partPos = pos
+          var partLen = 0
+
+          if pos < sectionText.len and sectionText[pos] == '"':
+            advance()
+            partLen = 1
+            while pos < sectionText.len and sectionText[pos] != '"' and sectionText[pos] != '\n':
+              if sectionText[pos] == '\\' and pos + 1 < sectionText.len:
+                advance()
+                inc partLen
+              advance()
+              inc partLen
+            if pos < sectionText.len and sectionText[pos] == '"':
+              advance()
+              inc partLen
+            keyParts.add((partCol, partLen, partPos))
+          elif pos < sectionText.len and sectionText[pos] == '\'':
+            advance()
+            partLen = 1
+            while pos < sectionText.len and sectionText[pos] != '\'' and sectionText[pos] != '\n':
+              advance()
+              inc partLen
+            if pos < sectionText.len and sectionText[pos] == '\'':
+              advance()
+              inc partLen
+            keyParts.add((partCol, partLen, partPos))
+          elif pos < sectionText.len and isBareKeyChar(sectionText[pos]):
+            while pos < sectionText.len and isBareKeyChar(sectionText[pos]):
+              advance()
+              inc partLen
+            keyParts.add((partCol, partLen, partPos))
+          else:
+            break parseKey
+
+          skipWhitespace()
+          if pos < sectionText.len and sectionText[pos] == '.':
+            dotPositions.add((line, col))
+            advance()
+            skipWhitespace()
+          else:
+            break
+
+        skipWhitespace()
+        if pos < sectionText.len and sectionText[pos] == '=':
+          isKey = true
+
+      if isKey:
+        for (partCol, partLen, partPos) in keyParts:
+          tokens.add(TomlToken(kind: ttProperty, line: keyStartLine,
+                               col: partCol, length: partLen))
+        for (dotLine, dotCol) in dotPositions:
+          tokens.add(TomlToken(kind: ttOperator, line: dotLine,
+                               col: dotCol, length: 1))
+        tokens.add(TomlToken(kind: ttOperator, line: line, col: col, length: 1))
+        advance() # skip =
+        skipWhitespace()
+
+        if pos >= sectionText.len or sectionText[pos] == '\n':
+          continue
+
+        let vc = sectionText[pos]
+
+        # Multi-line basic string """
+        if vc == '"' and peek(1) == '"' and peek(2) == '"':
+          let sLine = line
+          let sCol = col
+          let sPos = pos
+          advance(); advance(); advance()
+          if pos < sectionText.len and sectionText[pos] == '\n':
+            advance()
+          elif pos < sectionText.len and sectionText[pos] == '\r' and peek(1) == '\n':
+            advance(); advance()
+          while pos < sectionText.len:
+            if sectionText[pos] == '"' and peek(1) == '"' and peek(2) == '"':
+              advance(); advance(); advance()
+              break
+            if sectionText[pos] == '\\':
+              advance()
+              if pos < sectionText.len: advance()
+            else:
+              advance()
+          emitMultiLineFromText(tokens, ttString, sectionText, sPos, pos, sLine, sCol)
+          continue
+
+        # Multi-line literal string '''
+        if vc == '\'' and peek(1) == '\'' and peek(2) == '\'':
+          let sLine = line
+          let sCol = col
+          let sPos = pos
+          advance(); advance(); advance()
+          if pos < sectionText.len and sectionText[pos] == '\n':
+            advance()
+          elif pos < sectionText.len and sectionText[pos] == '\r' and peek(1) == '\n':
+            advance(); advance()
+          while pos < sectionText.len:
+            if sectionText[pos] == '\'' and peek(1) == '\'' and peek(2) == '\'':
+              advance(); advance(); advance()
+              break
+            advance()
+          emitMultiLineFromText(tokens, ttString, sectionText, sPos, pos, sLine, sCol)
+          continue
+
+        # Basic string "..."
+        if vc == '"':
+          let sCol = col
+          let sPos = pos
+          advance()
+          while pos < sectionText.len and sectionText[pos] != '"' and sectionText[pos] != '\n':
+            if sectionText[pos] == '\\' and pos + 1 < sectionText.len:
+              advance()
+            advance()
+          if pos < sectionText.len and sectionText[pos] == '"':
+            advance()
+          tokens.add(TomlToken(kind: ttString, line: line, col: sCol,
+                               length: pos - sPos))
+          continue
+
+        # Literal string '...'
+        if vc == '\'':
+          let sCol = col
+          let sPos = pos
+          advance()
+          while pos < sectionText.len and sectionText[pos] != '\'' and sectionText[pos] != '\n':
+            advance()
+          if pos < sectionText.len and sectionText[pos] == '\'':
+            advance()
+          tokens.add(TomlToken(kind: ttString, line: line, col: sCol,
+                               length: pos - sPos))
+          continue
+
+        # Keywords: true, false, inf, +inf, -inf, nan, +nan, -nan
+        if vc == 't' and pos + 3 < sectionText.len and sectionText[pos..pos+3] == "true":
+          let nextCh = if pos + 4 < sectionText.len: sectionText[pos + 4] else: '\0'
+          if not isBareKeyChar(nextCh):
+            tokens.add(TomlToken(kind: ttKeyword, line: line, col: col, length: 4))
+            for _ in 0..<4: advance()
+            continue
+
+        if vc == 'f' and pos + 4 < sectionText.len and sectionText[pos..pos+4] == "false":
+          let nextCh = if pos + 5 < sectionText.len: sectionText[pos + 5] else: '\0'
+          if not isBareKeyChar(nextCh):
+            tokens.add(TomlToken(kind: ttKeyword, line: line, col: col, length: 5))
+            for _ in 0..<5: advance()
+            continue
+
+        if vc == 'i' and pos + 2 < sectionText.len and sectionText[pos..pos+2] == "inf":
+          let nextCh = if pos + 3 < sectionText.len: sectionText[pos + 3] else: '\0'
+          if not isBareKeyChar(nextCh):
+            tokens.add(TomlToken(kind: ttKeyword, line: line, col: col, length: 3))
+            for _ in 0..<3: advance()
+            continue
+
+        if vc == 'n' and pos + 2 < sectionText.len and sectionText[pos..pos+2] == "nan":
+          let nextCh = if pos + 3 < sectionText.len: sectionText[pos + 3] else: '\0'
+          if not isBareKeyChar(nextCh):
+            tokens.add(TomlToken(kind: ttKeyword, line: line, col: col, length: 3))
+            for _ in 0..<3: advance()
+            continue
+
+        if (vc == '+' or vc == '-') and pos + 1 < sectionText.len:
+          let nextWord = if pos + 3 < sectionText.len: sectionText[pos+1..pos+3] else: ""
+          if nextWord == "inf":
+            let afterCh = if pos + 4 < sectionText.len: sectionText[pos + 4] else: '\0'
+            if not isBareKeyChar(afterCh):
+              tokens.add(TomlToken(kind: ttKeyword, line: line, col: col, length: 4))
+              for _ in 0..<4: advance()
+              continue
+          if nextWord == "nan":
+            let afterCh = if pos + 4 < sectionText.len: sectionText[pos + 4] else: '\0'
+            if not isBareKeyChar(afterCh):
+              tokens.add(TomlToken(kind: ttKeyword, line: line, col: col, length: 4))
+              for _ in 0..<4: advance()
+              continue
+
+        # Numbers and datetimes
+        if vc in {'0'..'9'} or ((vc == '+' or vc == '-') and peek(1) in {'0'..'9'}):
+          let sCol = col
+          let sPos = pos
+
+          var valLen = 0
+          var hasDateSep = false
+          var hasTimeSep = false
+
+          if vc == '0' and peek(1) in {'x', 'o', 'b'}:
+            advance(); advance()
+            valLen = 2
+            while pos < sectionText.len and sectionText[pos] in
+                {'0'..'9', 'a'..'f', 'A'..'F', '_'}:
+              advance()
+              inc valLen
+            tokens.add(TomlToken(kind: ttNumber, line: line, col: sCol,
+                                 length: valLen))
+            continue
+
+          if vc in {'+', '-'}:
+            advance()
+            inc valLen
+
+          while pos < sectionText.len and sectionText[pos] in
+              {'0'..'9', '-', ':', '.', 'T', 'Z', '+', '_', 'e', 'E'}:
+            if sectionText[pos] == '-' and valLen >= 4: hasDateSep = true
+            if sectionText[pos] == ':': hasTimeSep = true
+            advance()
+            inc valLen
+
+          if hasDateSep or hasTimeSep:
+            tokens.add(TomlToken(kind: ttDatetime, line: line, col: sCol,
+                                 length: valLen))
+          else:
+            tokens.add(TomlToken(kind: ttNumber, line: line, col: sCol,
+                                 length: valLen))
+          continue
+
+        # Inline table or array values - skip structural chars
+        if vc in {'{', '}', '[', ']', ','}:
+          advance()
+          continue
+
+        # Unknown value char - skip
+        advance()
+        continue
+      else:
+        pos = savedPos
+        line = savedLine
+        col = savedCol
+        advance()
+        continue
+
+    # Skip any other character
+    advance()
+
+  tomlSectionChannels[args.chanIdx].send(tokens)
+
+proc tokenizeTomlParallel(text: string): seq[TomlToken] =
+  if text.len == 0: return @[]
+
+  var lineOffsets: seq[int] = @[0]
+  for i in 0..<text.len:
+    if text[i] == '\n': lineOffsets.add(i + 1)
+  let totalLines = lineOffsets.len
+
+  if totalLines < ParallelLineThreshold:
+    return tokenizeToml(text)
+
+  let threadCount = min(countProcessors(), MaxTokenThreads)
+  if threadCount <= 1:
+    return tokenizeToml(text)
+
+  let textPtr = cast[ptr UncheckedArray[char]](unsafeAddr text[0])
+  let linesPerSection = totalLines div threadCount
+
+  # Pre-scan to determine state at each section boundary (sequential, cumulative)
+  var states: seq[TomlTokenizerState] = @[TomlTokenizerState()]
+  for t in 0..<threadCount - 1:
+    let sLine = t * linesPerSection
+    let eLine = (t + 1) * linesPerSection - 1
+    let startPos = lineOffsets[sLine]
+    let endPos = if eLine + 1 < lineOffsets.len: lineOffsets[eLine + 1] else: text.len
+    states.add(preScanTomlState(text, startPos, endPos, states[t]))
+
+  for t in 0..<threadCount:
+    let sLine = t * linesPerSection
+    let eLine = if t == threadCount - 1: totalLines - 1
+                else: (t + 1) * linesPerSection - 1
+    let startPos = lineOffsets[sLine]
+    let endPos = if eLine + 1 < lineOffsets.len: lineOffsets[eLine + 1] else: text.len
+    tomlSectionChannels[t].open()
+    createThread(tomlSectionThreads[t], tomlSectionWorker, TomlSectionArgs(
+      textPtr: textPtr, textLen: text.len,
+      startPos: startPos, endPos: endPos,
+      startLine: sLine, initState: states[t], chanIdx: t
+    ))
+
+  var allTokens: seq[TomlToken] = @[]
+  for t in 0..<threadCount:
+    joinThread(tomlSectionThreads[t])
+    let (hasData, sectionTokens) = tomlSectionChannels[t].tryRecv()
+    if hasData: allTokens.add(sectionTokens)
+    tomlSectionChannels[t].close()
+
+  return allTokens
+
+# ---------------------------------------------------------------------------
 # Range Tokenizer
 # ---------------------------------------------------------------------------
 
 proc tokenizeTomlRange(text: string, startLine, endLine: int): seq[TomlToken] =
   ## Tokenize full text but only emit tokens in [startLine..endLine]
-  let allTokens = tokenizeToml(text)
+  let allTokens = tokenizeTomlParallel(text)
   result = @[]
   for tok in allTokens:
     if tok.line >= startLine and tok.line <= endLine:
@@ -603,7 +1099,7 @@ proc main() =
         if doc.uri == uri:
           text = doc.text
           break
-      let tokens = tokenizeToml(text)
+      let tokens = tokenizeTomlParallel(text)
       let data = encodeSemanticTokens(tokens)
       var dataJson = newJArray()
       for v in data:

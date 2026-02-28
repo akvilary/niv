@@ -1,7 +1,7 @@
 ## niv_css_lsp — minimal CSS Language Server with semantic tokens
 ## Communicates via stdin/stdout using JSON-RPC 2.0 with Content-Length framing
 
-import std/[json, strutils]
+import std/[json, strutils, cpuinfo]
 
 # ---------------------------------------------------------------------------
 # Types
@@ -429,11 +429,381 @@ proc tokenizeCss(text: string): seq[CssToken] =
   return tokens
 
 # ---------------------------------------------------------------------------
+# Parallel Tokenizer
+# ---------------------------------------------------------------------------
+
+const
+  MaxTokenThreads = 4
+  ParallelLineThreshold = 4000
+
+type
+  CssTokenizerState = object
+    braceDepth: int
+    inValue: bool
+    inAtRuleBlock: seq[bool]
+    afterAtRule: bool
+
+  CssSectionArgs = object
+    textPtr: ptr UncheckedArray[char]
+    textLen: int
+    startPos: int
+    endPos: int
+    startLine: int
+    initState: CssTokenizerState
+    chanIdx: int
+
+var cssSectionChannels: array[MaxTokenThreads, Channel[seq[CssToken]]]
+var cssSectionThreads: array[MaxTokenThreads, Thread[CssSectionArgs]]
+
+proc preScanCssState(text: string, startPos, endPos: int, initState: CssTokenizerState): CssTokenizerState =
+  ## Lightweight pre-scan tracking only cross-line state variables.
+  result = initState
+  var pos = startPos
+  while pos < endPos:
+    # Skip comments
+    if pos + 1 < endPos and text[pos] == '/' and text[pos+1] == '*':
+      pos += 2
+      while pos + 1 < endPos:
+        if text[pos] == '*' and text[pos+1] == '/':
+          pos += 2
+          break
+        inc pos
+      continue
+    # Skip strings
+    if text[pos] in {'"', '\''}:
+      let q = text[pos]; inc pos
+      while pos < endPos and text[pos] != q and text[pos] != '\n':
+        if text[pos] == '\\' and pos + 1 < endPos: inc pos
+        inc pos
+      if pos < endPos and text[pos] == q: inc pos
+      continue
+    case text[pos]
+    of '{':
+      inc result.braceDepth
+      result.inAtRuleBlock.add(result.afterAtRule)
+      result.afterAtRule = false
+      result.inValue = false
+    of '}':
+      if result.braceDepth > 0: dec result.braceDepth
+      if result.inAtRuleBlock.len > 0: discard result.inAtRuleBlock.pop()
+      result.inValue = false
+    of ';':
+      result.inValue = false
+    of ':':
+      let inSelectorCtx = result.braceDepth == 0 or
+        (result.inAtRuleBlock.len > 0 and result.inAtRuleBlock[^1])
+      if not inSelectorCtx:
+        result.inValue = true
+    of '@':
+      inc pos
+      var wordStart = pos
+      while pos < endPos and text[pos] in {'A'..'Z', 'a'..'z', '0'..'9', '_', '-'}:
+        inc pos
+      let word = text[wordStart..<pos]
+      if word in ["media", "supports", "layer", "container", "scope",
+                   "starting-style", "keyframes"]:
+        result.afterAtRule = true
+      continue
+    else: discard
+    inc pos
+
+proc cssSectionWorker(args: CssSectionArgs) {.thread.} =
+  ## Tokenize a section of CSS text with given initial state.
+  var sectionLen = args.endPos - args.startPos
+  var sectionText = newString(sectionLen)
+  if sectionLen > 0:
+    copyMem(addr sectionText[0], addr args.textPtr[args.startPos], sectionLen)
+
+  var tokens: seq[CssToken]
+  var pos = 0
+  var line = args.startLine
+  var col = 0
+  var braceDepth = args.initState.braceDepth
+  var inValue = args.initState.inValue
+  var inAtRuleBlock = args.initState.inAtRuleBlock
+  var afterAtRule = args.initState.afterAtRule
+
+  template ch(): char =
+    if pos < sectionText.len: sectionText[pos] else: '\0'
+
+  template peek(offset: int): char =
+    if pos + offset < sectionText.len: sectionText[pos + offset] else: '\0'
+
+  template advance() =
+    if pos < sectionText.len:
+      if sectionText[pos] == '\n':
+        inc line; col = 0
+      else:
+        inc col
+      inc pos
+
+  while pos < sectionText.len:
+    let c = ch()
+
+    if c == '\n': advance(); continue
+    if c in {' ', '\t', '\r'}: advance(); continue
+
+    # Comment /* ... */
+    if c == '/' and peek(1) == '*':
+      let sCol = col
+      let sLine = line
+      advance(); advance()
+      while pos < sectionText.len:
+        if sectionText[pos] == '*' and peek(1) == '/':
+          advance(); advance()
+          break
+        advance()
+      if sLine == line:
+        tokens.add(CssToken(kind: ctComment, line: sLine, col: sCol, length: col - sCol))
+      else:
+        var lineTexts: seq[string]
+        var currentLineStart = 0
+        for i in 0..<sectionText.len:
+          if sectionText[i] == '\n':
+            lineTexts.add(sectionText[currentLineStart..<i])
+            currentLineStart = i + 1
+        lineTexts.add(sectionText[currentLineStart..<sectionText.len])
+        let relSLine = sLine - args.startLine
+        let relLine = line - args.startLine
+        if relSLine < lineTexts.len:
+          tokens.add(CssToken(kind: ctComment, line: sLine, col: sCol,
+                               length: lineTexts[relSLine].len - sCol))
+        for ln in (sLine + 1)..<line:
+          let relLn = ln - args.startLine
+          if relLn < lineTexts.len:
+            tokens.add(CssToken(kind: ctComment, line: ln, col: 0,
+                                 length: lineTexts[relLn].len))
+        if relLine < lineTexts.len:
+          tokens.add(CssToken(kind: ctComment, line: line, col: 0, length: col))
+      continue
+
+    # String
+    if c == '"' or c == '\'':
+      let q = c
+      let sCol = col; let sLine = line
+      advance()
+      while pos < sectionText.len and sectionText[pos] != q:
+        if sectionText[pos] == '\\' and pos + 1 < sectionText.len: advance()
+        advance()
+      if pos < sectionText.len: advance()
+      if sLine == line:
+        tokens.add(CssToken(kind: ctString, line: sLine, col: sCol, length: col - sCol))
+      continue
+
+    # At-rules
+    if c == '@':
+      let sCol = col; let sLine = line
+      advance()
+      let wordStart = pos
+      while pos < sectionText.len and isWordChar(sectionText[pos]): advance()
+      let word = sectionText[wordStart..<pos]
+      tokens.add(CssToken(kind: ctKeyword, line: sLine, col: sCol, length: 1 + word.len))
+      if word in ["media", "supports", "layer", "container", "scope",
+                   "starting-style", "keyframes"]:
+        afterAtRule = true
+      continue
+
+    let inSelectorCtx = braceDepth == 0 or
+      (inAtRuleBlock.len > 0 and inAtRuleBlock[^1])
+
+    # Hex color
+    if c == '#' and not inSelectorCtx and inValue:
+      let sCol = col; let sLine = line
+      advance()
+      while pos < sectionText.len and isHexDigit(sectionText[pos]): advance()
+      tokens.add(CssToken(kind: ctNumber, line: sLine, col: sCol, length: col - sCol))
+      continue
+
+    # Class/ID selector
+    if (c == '.' or c == '#') and inSelectorCtx:
+      let sCol = col; let sLine = line
+      advance()
+      while pos < sectionText.len and isWordChar(sectionText[pos]): advance()
+      if col - sCol > 1:
+        tokens.add(CssToken(kind: ctClass, line: sLine, col: sCol, length: col - sCol))
+      continue
+
+    # Pseudo-class/element
+    if c == ':' and inSelectorCtx:
+      let sCol = col; let sLine = line
+      advance()
+      if pos < sectionText.len and sectionText[pos] == ':': advance()
+      if pos < sectionText.len and isIdentStart(sectionText[pos]):
+        while pos < sectionText.len and isWordChar(sectionText[pos]): advance()
+        tokens.add(CssToken(kind: ctClass, line: sLine, col: sCol, length: col - sCol))
+      else:
+        tokens.add(CssToken(kind: ctOperator, line: sLine, col: sCol, length: 1))
+      continue
+
+    # Colon in declaration
+    if c == ':' and not inSelectorCtx:
+      let sCol = col
+      advance()
+      tokens.add(CssToken(kind: ctOperator, line: line, col: sCol, length: 1))
+      inValue = true
+      continue
+
+    if c == ';':
+      let sCol = col; advance()
+      tokens.add(CssToken(kind: ctOperator, line: line, col: sCol, length: 1))
+      inValue = false
+      continue
+
+    if c == '{':
+      let sCol = col; advance()
+      tokens.add(CssToken(kind: ctOperator, line: line, col: sCol, length: 1))
+      inc braceDepth
+      inAtRuleBlock.add(afterAtRule)
+      afterAtRule = false
+      inValue = false
+      continue
+
+    if c == '}':
+      let sCol = col; advance()
+      tokens.add(CssToken(kind: ctOperator, line: line, col: sCol, length: 1))
+      if braceDepth > 0: dec braceDepth
+      if inAtRuleBlock.len > 0: discard inAtRuleBlock.pop()
+      inValue = false
+      continue
+
+    if c == ',':
+      let sCol = col; advance()
+      tokens.add(CssToken(kind: ctOperator, line: line, col: sCol, length: 1))
+      continue
+
+    if c in {'>', '+', '~'} and inSelectorCtx:
+      let sCol = col; advance()
+      tokens.add(CssToken(kind: ctOperator, line: line, col: sCol, length: 1))
+      continue
+
+    if c == '!' and braceDepth > 0:
+      let sCol = col; let sLine = line
+      advance()
+      while pos < sectionText.len and sectionText[pos] in {' ', '\t'}: advance()
+      let wordStart = pos
+      while pos < sectionText.len and sectionText[pos] in {'a'..'z', 'A'..'Z'}: advance()
+      let word = sectionText[wordStart..<pos]
+      if word == "important":
+        tokens.add(CssToken(kind: ctKeyword, line: sLine, col: sCol, length: col - sCol))
+      continue
+
+    if isDigit(c) or (c == '.' and isDigit(peek(1))):
+      let sCol = col; let sLine = line
+      while pos < sectionText.len and isDigit(sectionText[pos]): advance()
+      if pos < sectionText.len and sectionText[pos] == '.' and pos + 1 < sectionText.len and isDigit(sectionText[pos + 1]):
+        advance()
+        while pos < sectionText.len and isDigit(sectionText[pos]): advance()
+      if pos < sectionText.len and sectionText[pos] == '%':
+        advance()
+      elif pos < sectionText.len and sectionText[pos] in {'a'..'z', 'A'..'Z'}:
+        while pos < sectionText.len and sectionText[pos] in {'a'..'z', 'A'..'Z'}: advance()
+      tokens.add(CssToken(kind: ctNumber, line: sLine, col: sCol, length: col - sCol))
+      continue
+
+    if c == '*' and inSelectorCtx:
+      let sCol = col; advance()
+      tokens.add(CssToken(kind: ctType, line: line, col: sCol, length: 1))
+      continue
+
+    if c == '[':
+      advance()
+      while pos < sectionText.len and sectionText[pos] != ']':
+        if sectionText[pos] in {'"', '\''}:
+          let q = sectionText[pos]; advance()
+          while pos < sectionText.len and sectionText[pos] != q:
+            if sectionText[pos] == '\\': advance()
+            advance()
+          if pos < sectionText.len: advance()
+        else: advance()
+      if pos < sectionText.len: advance()
+      continue
+
+    if c == '(': advance(); continue
+    if c == ')': advance(); continue
+
+    if isIdentStart(c) or c == '-':
+      let sCol = col; let sLine = line; let sPos = pos
+      if c == '-' and peek(1) == '-':
+        advance(); advance()
+        while pos < sectionText.len and isWordChar(sectionText[pos]): advance()
+        tokens.add(CssToken(kind: ctParameter, line: sLine, col: sCol, length: col - sCol))
+        continue
+      while pos < sectionText.len and isWordChar(sectionText[pos]): advance()
+      let word = sectionText[sPos..<pos]
+      if word == "-": continue
+      if pos < sectionText.len and sectionText[pos] == '(':
+        tokens.add(CssToken(kind: ctFunction, line: sLine, col: sCol, length: word.len))
+        continue
+      if word in ["and", "or", "not", "only"]:
+        tokens.add(CssToken(kind: ctKeyword, line: sLine, col: sCol, length: word.len))
+        continue
+      if inSelectorCtx:
+        if isTagName(word):
+          tokens.add(CssToken(kind: ctType, line: sLine, col: sCol, length: word.len))
+        continue
+      if not inValue:
+        tokens.add(CssToken(kind: ctProperty, line: sLine, col: sCol, length: word.len))
+      continue
+
+    advance()
+
+  cssSectionChannels[args.chanIdx].send(tokens)
+
+proc tokenizeCssParallel(text: string): seq[CssToken] =
+  if text.len == 0: return @[]
+
+  var lineOffsets: seq[int] = @[0]
+  for i in 0..<text.len:
+    if text[i] == '\n': lineOffsets.add(i + 1)
+  let totalLines = lineOffsets.len
+
+  if totalLines < ParallelLineThreshold:
+    return tokenizeCss(text)
+
+  let threadCount = min(countProcessors(), MaxTokenThreads)
+  if threadCount <= 1:
+    return tokenizeCss(text)
+
+  let textPtr = cast[ptr UncheckedArray[char]](unsafeAddr text[0])
+  let linesPerSection = totalLines div threadCount
+
+  # Pre-scan to determine state at each section boundary (sequential, cumulative)
+  var states: seq[CssTokenizerState] = @[CssTokenizerState()]
+  for t in 0..<threadCount - 1:
+    let sLine = t * linesPerSection
+    let eLine = (t + 1) * linesPerSection - 1
+    let startPos = lineOffsets[sLine]
+    let endPos = if eLine + 1 < lineOffsets.len: lineOffsets[eLine + 1] else: text.len
+    states.add(preScanCssState(text, startPos, endPos, states[t]))
+
+  for t in 0..<threadCount:
+    let sLine = t * linesPerSection
+    let eLine = if t == threadCount - 1: totalLines - 1
+                else: (t + 1) * linesPerSection - 1
+    let startPos = lineOffsets[sLine]
+    let endPos = if eLine + 1 < lineOffsets.len: lineOffsets[eLine + 1] else: text.len
+    cssSectionChannels[t].open()
+    createThread(cssSectionThreads[t], cssSectionWorker, CssSectionArgs(
+      textPtr: textPtr, textLen: text.len,
+      startPos: startPos, endPos: endPos,
+      startLine: sLine, initState: states[t], chanIdx: t
+    ))
+
+  var allTokens: seq[CssToken] = @[]
+  for t in 0..<threadCount:
+    joinThread(cssSectionThreads[t])
+    let (hasData, sectionTokens) = cssSectionChannels[t].tryRecv()
+    if hasData: allTokens.add(sectionTokens)
+    cssSectionChannels[t].close()
+
+  return allTokens
+
+# ---------------------------------------------------------------------------
 # Range Tokenizer
 # ---------------------------------------------------------------------------
 
 proc tokenizeCssRange(text: string, startLine, endLine: int): seq[CssToken] =
-  let allTokens = tokenizeCss(text)
+  let allTokens = tokenizeCssParallel(text)
   result = @[]
   for tok in allTokens:
     if tok.line >= startLine and tok.line <= endLine:
@@ -595,7 +965,7 @@ proc main() =
         if doc.uri == uri:
           text = doc.text
           break
-      let tokens = tokenizeCss(text)
+      let tokens = tokenizeCssParallel(text)
       let data = encodeSemanticTokens(tokens)
       var dataJson = newJArray()
       for v in data:

@@ -1,7 +1,7 @@
 ## niv_json_lsp — minimal JSON Language Server with semantic tokens
 ## Communicates via stdin/stdout using JSON-RPC 2.0 with Content-Length framing
 
-import std/[json, strutils, os, posix]
+import std/[json, strutils, os, posix, cpuinfo]
 
 # ---------------------------------------------------------------------------
 # Types
@@ -279,6 +279,187 @@ proc encodeSemanticTokens(tokens: seq[JsonToken]): seq[int] =
     result.add(0)  # no modifiers
     prevLine = tok.line
     prevCol = tok.col
+
+# ---------------------------------------------------------------------------
+# Parallel Tokenizer (no cross-line state needed for JSON)
+# ---------------------------------------------------------------------------
+
+const
+  MaxTokenThreads = 4
+  ParallelLineThreshold = 4000
+
+type
+  SectionArgs = object
+    textPtr: ptr UncheckedArray[char]
+    textLen: int
+    startPos: int
+    endPos: int
+    startLine: int
+    chanIdx: int
+
+var sectionChannels: array[MaxTokenThreads, Channel[seq[JsonToken]]]
+var sectionThreads: array[MaxTokenThreads, Thread[SectionArgs]]
+
+proc tokenizeSectionWorker(args: SectionArgs) {.thread.} =
+  ## Tokenize a section of text [startPos, endPos) producing tokens.
+  ## Uses ptr to shared text (read-only). Lookahead for ':' may read past endPos.
+  var tokens: seq[JsonToken] = @[]
+  var pos = args.startPos
+  var line = args.startLine
+  var col = 0
+  let tp = args.textPtr
+  let tLen = args.textLen
+  let endPos = args.endPos
+
+  while pos < endPos:
+    # Skip whitespace
+    while pos < endPos and tp[pos] in {' ', '\t', '\r', '\n'}:
+      if tp[pos] == '\n':
+        inc line; col = 0
+      else:
+        inc col
+      inc pos
+    if pos >= endPos: break
+
+    case tp[pos]
+    of '"':
+      let sLine = line
+      let sCol = col
+      inc pos; inc col  # skip opening "
+      var length = 1
+      while pos < tLen:
+        let c = tp[pos]
+        if c == '\\':
+          inc pos; inc col; inc length
+          if pos < tLen:
+            inc pos; inc col; inc length
+        elif c == '"':
+          inc pos; inc col; inc length
+          break
+        elif c == '\n':
+          break
+        else:
+          inc pos; inc col; inc length
+      # Lookahead for ':' (may read past endPos — that's fine, read-only)
+      var lookPos = pos
+      while lookPos < tLen and tp[lookPos] in {' ', '\t', '\r', '\n'}:
+        inc lookPos
+      let isProperty = lookPos < tLen and tp[lookPos] == ':'
+      if isProperty:
+        tokens.add(JsonToken(kind: jtProperty, line: sLine, col: sCol, length: length))
+      else:
+        tokens.add(JsonToken(kind: jtString, line: sLine, col: sCol, length: length))
+
+    of '-', '0'..'9':
+      let sLine = line
+      let sCol = col
+      var length = 0
+      if tp[pos] == '-':
+        inc pos; inc col; inc length
+      while pos < tLen and tp[pos] in {'0'..'9'}:
+        inc pos; inc col; inc length
+      if pos < tLen and tp[pos] == '.':
+        inc pos; inc col; inc length
+        while pos < tLen and tp[pos] in {'0'..'9'}:
+          inc pos; inc col; inc length
+      if pos < tLen and tp[pos] in {'e', 'E'}:
+        inc pos; inc col; inc length
+        if pos < tLen and tp[pos] in {'+', '-'}:
+          inc pos; inc col; inc length
+        while pos < tLen and tp[pos] in {'0'..'9'}:
+          inc pos; inc col; inc length
+      tokens.add(JsonToken(kind: jtNumber, line: sLine, col: sCol, length: length))
+
+    of 't':
+      let sLine = line
+      let sCol = col
+      if pos + 3 < tLen and tp[pos+1] == 'r' and tp[pos+2] == 'u' and tp[pos+3] == 'e':
+        pos += 4; col += 4
+        tokens.add(JsonToken(kind: jtKeyword, line: sLine, col: sCol, length: 4))
+      else:
+        inc pos; inc col
+
+    of 'f':
+      let sLine = line
+      let sCol = col
+      if pos + 4 < tLen and tp[pos+1] == 'a' and tp[pos+2] == 'l' and tp[pos+3] == 's' and tp[pos+4] == 'e':
+        pos += 5; col += 5
+        tokens.add(JsonToken(kind: jtKeyword, line: sLine, col: sCol, length: 5))
+      else:
+        inc pos; inc col
+
+    of 'n':
+      let sLine = line
+      let sCol = col
+      if pos + 3 < tLen and tp[pos+1] == 'u' and tp[pos+2] == 'l' and tp[pos+3] == 'l':
+        pos += 4; col += 4
+        tokens.add(JsonToken(kind: jtKeyword, line: sLine, col: sCol, length: 4))
+      else:
+        inc pos; inc col
+
+    else:
+      if tp[pos] == '\n':
+        inc line; col = 0
+      else:
+        inc col
+      inc pos
+
+  sectionChannels[args.chanIdx].send(tokens)
+
+proc tokenizeJsonParallel(text: string): (seq[JsonToken], seq[DiagInfo]) =
+  ## Parallel tokenizer for large JSON files. Falls back to single-threaded
+  ## for small files. Diagnostics only produced for small files.
+  if text.len == 0:
+    return (@[], @[])
+
+  # Build line offsets
+  var lineOffsets: seq[int] = @[0]
+  for i in 0..<text.len:
+    if text[i] == '\n':
+      lineOffsets.add(i + 1)
+  let totalLines = lineOffsets.len
+
+  if totalLines < ParallelLineThreshold:
+    return tokenizeJson(text)
+
+  let threadCount = min(countProcessors(), MaxTokenThreads)
+  if threadCount <= 1:
+    return tokenizeJson(text)
+
+  let textPtr = cast[ptr UncheckedArray[char]](unsafeAddr text[0])
+  let textLen = text.len
+
+  # Split into sections at line boundaries
+  let linesPerSection = totalLines div threadCount
+
+  # Open channels and spawn threads
+  for t in 0..<threadCount:
+    let sLine = t * linesPerSection
+    let eLine = if t == threadCount - 1: totalLines - 1
+                else: (t + 1) * linesPerSection - 1
+    let startPos = lineOffsets[sLine]
+    let endPos = if eLine + 1 < lineOffsets.len: lineOffsets[eLine + 1]
+                 else: textLen
+    sectionChannels[t].open()
+    createThread(sectionThreads[t], tokenizeSectionWorker, SectionArgs(
+      textPtr: textPtr,
+      textLen: textLen,
+      startPos: startPos,
+      endPos: endPos,
+      startLine: sLine,
+      chanIdx: t
+    ))
+
+  # Collect results in order
+  var allTokens: seq[JsonToken] = @[]
+  for t in 0..<threadCount:
+    joinThread(sectionThreads[t])
+    let (hasData, sectionTokens) = sectionChannels[t].tryRecv()
+    if hasData:
+      allTokens.add(sectionTokens)
+    sectionChannels[t].close()
+
+  return (allTokens, @[])
 
 # ---------------------------------------------------------------------------
 # Inside-out Range Tokenizer (no full-context stack needed)
@@ -584,7 +765,7 @@ proc main() =
         if doc.uri == uri:
           text = doc.text
           break
-      let (tokens, _) = tokenizeJson(text)
+      let (tokens, _) = tokenizeJsonParallel(text)
       let data = encodeSemanticTokens(tokens)
       var dataJson = newJArray()
       for v in data:

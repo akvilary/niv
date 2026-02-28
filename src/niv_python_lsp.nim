@@ -9,7 +9,7 @@
 ##   - Go-to-definition with import resolution and inheritance chain (MRO)
 ##   - Basic diagnostics (unterminated strings)
 
-import std/[json, strutils, os, tables, osproc, sets]
+import std/[json, strutils, os, tables, osproc, sets, cpuinfo]
 
 # ---------------------------------------------------------------------------
 # Types
@@ -160,6 +160,600 @@ proc emitStringTokens(tokens: var seq[PythonToken], text: string,
       if p < textEnd and text[p] == '\n':
         inc p
       inc curLine
+
+# Forward declaration
+proc tokenizePython(text: string): (seq[PythonToken], seq[DiagInfo])
+
+# ---------------------------------------------------------------------------
+# Parallel Tokenizer
+# ---------------------------------------------------------------------------
+
+const
+  MaxTokenThreads = 4
+  ParallelLineThreshold = 4000
+
+type
+  PythonTokenizerState = object
+    inTripleString: bool
+    tripleStringQuote: char  # '"' or '\''
+
+  PythonSectionArgs = object
+    textPtr: ptr UncheckedArray[char]
+    textLen: int
+    startPos: int
+    endPos: int
+    startLine: int
+    initState: PythonTokenizerState
+    chanIdx: int
+
+var pythonSectionChannels: array[MaxTokenThreads, Channel[seq[PythonToken]]]
+var pythonSectionThreads: array[MaxTokenThreads, Thread[PythonSectionArgs]]
+
+proc preScanPythonState(text: string, startPos, endPos: int,
+                        initState: PythonTokenizerState): PythonTokenizerState =
+  ## Lightweight pre-scan tracking only cross-line state: triple-quoted strings.
+  result = initState
+  var pos = startPos
+  while pos < endPos:
+    if result.inTripleString:
+      # Inside a triple string, scan for closing delimiter
+      let q = result.tripleStringQuote
+      if text[pos] == '\\':
+        pos += 2  # skip escape
+        continue
+      if text[pos] == q and pos + 2 < endPos and
+         text[pos + 1] == q and text[pos + 2] == q:
+        pos += 3
+        result.inTripleString = false
+        continue
+      inc pos
+      continue
+    # Not in triple string
+    # Skip comments
+    if text[pos] == '#':
+      while pos < endPos and text[pos] != '\n':
+        inc pos
+      continue
+    # Skip string prefixes
+    if text[pos] in {'f', 'F', 'r', 'R', 'b', 'B', 'u', 'U'}:
+      var prefixLen = 1
+      var nextPos = pos + 1
+      if nextPos < endPos and text[nextPos] in {'f', 'F', 'r', 'R', 'b', 'B'}:
+        let c0 = text[pos].toLowerAscii()
+        let c1 = text[nextPos].toLowerAscii()
+        let pair = $c0 & $c1
+        if pair in ["rf", "fr", "rb", "br"]:
+          prefixLen = 2; nextPos = pos + 2
+      if nextPos < endPos and text[nextPos] in {'\'', '"'}:
+        let q = text[nextPos]
+        let isRaw = text[pos] in {'r', 'R'} or
+          (prefixLen == 2 and (text[pos] in {'r', 'R'} or text[pos + 1] in {'r', 'R'}))
+        pos = nextPos
+        # Check for triple quote
+        if pos + 2 < endPos and text[pos + 1] == q and text[pos + 2] == q:
+          pos += 3  # skip opening triple quote
+          # Scan for closing triple quote
+          var foundClose = false
+          while pos < endPos:
+            if text[pos] == '\\' and not isRaw:
+              pos += 2; continue
+            if text[pos] == q and pos + 2 < endPos and
+               text[pos + 1] == q and text[pos + 2] == q:
+              pos += 3
+              foundClose = true
+              break
+            inc pos
+          if not foundClose:
+            # Didn't find closing — we're inside a triple string
+            result.inTripleString = true
+            result.tripleStringQuote = q
+          continue
+        else:
+          # Single-line string
+          inc pos  # skip opening quote
+          while pos < endPos and text[pos] != q and text[pos] != '\n':
+            if text[pos] == '\\' and not isRaw and pos + 1 < endPos: inc pos
+            inc pos
+          if pos < endPos and text[pos] == q: inc pos
+          continue
+      else:
+        inc pos
+        continue
+    # Regular strings
+    if text[pos] in {'"', '\''}:
+      let q = text[pos]
+      # Check for triple quote
+      if pos + 2 < endPos and text[pos + 1] == q and text[pos + 2] == q:
+        pos += 3  # skip opening triple quote
+        var foundClose2 = false
+        while pos < endPos:
+          if text[pos] == '\\':
+            pos += 2; continue
+          if text[pos] == q and pos + 2 < endPos and
+             text[pos + 1] == q and text[pos + 2] == q:
+            pos += 3
+            foundClose2 = true
+            break
+          inc pos
+        if not foundClose2:
+          result.inTripleString = true
+          result.tripleStringQuote = q
+        continue
+      else:
+        # Single-line string
+        inc pos  # skip opening quote
+        while pos < endPos and text[pos] != q and text[pos] != '\n':
+          if text[pos] == '\\' and pos + 1 < endPos: inc pos
+          inc pos
+        if pos < endPos and text[pos] == q: inc pos
+        continue
+    inc pos
+
+proc isIdentCharStatic(c: char): bool =
+  c in {'a'..'z', 'A'..'Z', '0'..'9', '_'}
+
+proc pythonSectionWorker(args: PythonSectionArgs) {.thread.} =
+  ## Tokenize a section of Python text with given initial state.
+  ## Standalone — no closures, no global mutable state.
+  var sectionLen = args.endPos - args.startPos
+  var text = newString(sectionLen)
+  if sectionLen > 0:
+    copyMem(addr text[0], addr args.textPtr[args.startPos], sectionLen)
+
+  var tokens: seq[PythonToken]
+  var pos = 0
+  var line = args.startLine
+  var col = 0
+  var lastKeyword = ""
+  var afterDot = false
+  var inImportLine = false
+  var inFromLine = false
+  var inFuncParams = false
+  var funcParamDepth = 0
+  var isFirstParam = true
+  var afterParamColon = false
+  var expectParam = false
+
+  # Scope tracking (simplified for parallel — no indent-based popping for perf)
+  var scopeStack: seq[ScopeEntry] = @[ScopeEntry(kind: skModule, indent: -1)]
+  var lineIndent = 0
+  var atLineStart = true
+
+  # Build local lookup tables (thread-local)
+  var localKeywordSet: Table[string, bool]
+  var localKwOperatorSet: Table[string, bool]
+  var localBuiltinConstSet: Table[string, bool]
+  var localBuiltinTypeSet: Table[string, bool]
+  var localBuiltinFuncSet: Table[string, bool]
+  for kw in pythonKeywords: localKeywordSet[kw] = true
+  for kw in pythonKeywordOperators: localKwOperatorSet[kw] = true
+  for kw in pythonBuiltinConstants: localBuiltinConstSet[kw] = true
+  for kw in pythonBuiltinTypes: localBuiltinTypeSet[kw] = true
+  for kw in pythonBuiltinFunctions: localBuiltinFuncSet[kw] = true
+
+  template ch(): char =
+    if pos < text.len: text[pos] else: '\0'
+
+  template advance() =
+    if pos < text.len:
+      if text[pos] == '\n':
+        inc line; col = 0
+        atLineStart = true; lineIndent = 0
+        lastKeyword = ""
+        inImportLine = false; inFromLine = false; afterDot = false
+      else:
+        inc col
+      inc pos
+
+  template skipWs() =
+    while pos < text.len and text[pos] in {' ', '\t', '\r', '\n'}:
+      if atLineStart and text[pos] in {' ', '\t'}:
+        if text[pos] == '\t': lineIndent += 4
+        else: inc lineIndent
+      advance()
+    if atLineStart:
+      atLineStart = false
+      if not inFuncParams:
+        while scopeStack.len > 1 and scopeStack[^1].indent >= lineIndent:
+          scopeStack.setLen(scopeStack.len - 1)
+
+  proc inClassScopeLocal(stack: seq[ScopeEntry]): bool =
+    for i in countdown(stack.len - 1, 0):
+      if stack[i].kind == skClass: return true
+      if stack[i].kind == skFunction: return false
+    return false
+
+  # If we start inside a triple string, emit string tokens until closing delimiter
+  if args.initState.inTripleString:
+    let q = args.initState.tripleStringQuote
+    let sLine = line
+    let sCol = col
+    while pos < text.len:
+      if text[pos] == '\\':
+        advance()
+        if pos < text.len: advance()
+      elif text[pos] == q and pos + 2 < text.len and
+           text[pos + 1] == q and text[pos + 2] == q:
+        advance(); advance(); advance()  # skip closing """
+        break
+      else:
+        advance()
+    # Emit per-line string tokens
+    emitStringTokens(tokens, text, 0, pos, sLine, sCol, line)
+
+  # Main tokenization loop
+  while pos < text.len:
+    skipWs()
+    if pos >= text.len: break
+    let c = ch()
+
+    case c
+    # Comments
+    of '#':
+      let sLine = line; let sCol = col; var length = 0
+      while pos < text.len and text[pos] != '\n':
+        advance(); inc length
+      tokens.add(PythonToken(kind: ptComment, line: sLine, col: sCol, length: length))
+
+    # Identifiers and string prefixes
+    of 'a'..'z', 'A'..'Z', '_':
+      let sLine = line; let sCol = col; let startPos = pos
+      let wasDot = afterDot; afterDot = false
+
+      var isStringPrefix = false
+      var isRaw = false
+      if c in {'f', 'F', 'r', 'R', 'b', 'B', 'u', 'U'}:
+        var prefixLen = 1; var nextPos = pos + 1
+        if nextPos < text.len and text[nextPos] in {'f', 'F', 'r', 'R', 'b', 'B'}:
+          let pair = ($c & $text[nextPos]).toLowerAscii()
+          if pair in ["rf", "fr", "rb", "br"]:
+            prefixLen = 2; inc nextPos
+        if nextPos < text.len and text[nextPos] in {'\'', '"'}:
+          isStringPrefix = true
+          isRaw = c in {'r', 'R'} or (prefixLen == 2 and (text[pos + 1] in {'r', 'R'} or c in {'r', 'R'}))
+          for _ in 0..<prefixLen: advance()
+          let quoteChar = text[pos]
+          # Inline readString logic
+          var strLen = 0
+          let isTriple = pos + 2 < text.len and text[pos + 1] == quoteChar and text[pos + 2] == quoteChar
+          if isTriple:
+            for _ in 0..<3: advance(); inc strLen
+            while pos < text.len:
+              if text[pos] == '\\' and not isRaw:
+                advance(); inc strLen
+                if pos < text.len: advance(); inc strLen
+              elif text[pos] == quoteChar and pos + 2 < text.len and
+                   text[pos + 1] == quoteChar and text[pos + 2] == quoteChar:
+                for _ in 0..<3: advance(); inc strLen
+                break
+              else:
+                advance(); inc strLen
+          else:
+            advance(); inc strLen  # opening quote
+            while pos < text.len:
+              if text[pos] == '\\' and not isRaw:
+                advance(); inc strLen
+                if pos < text.len: advance(); inc strLen
+              elif text[pos] == quoteChar:
+                advance(); inc strLen; break
+              elif text[pos] == '\n': break
+              else:
+                advance(); inc strLen
+          emitStringTokens(tokens, text, startPos, pos, sLine, sCol, line)
+
+      if not isStringPrefix:
+        while pos < text.len and isIdentCharStatic(text[pos]):
+          advance()
+        let word = text[startPos..<pos]
+        let length = pos - startPos
+
+        if word == "def" or word == "class":
+          tokens.add(PythonToken(kind: ptKeyword, line: sLine, col: sCol, length: length))
+          lastKeyword = word
+        elif word == "import":
+          tokens.add(PythonToken(kind: ptKeyword, line: sLine, col: sCol, length: length))
+          if inFromLine: inFromLine = false; inImportLine = true
+          else: inImportLine = true
+          lastKeyword = ""
+        elif word == "from":
+          tokens.add(PythonToken(kind: ptKeyword, line: sLine, col: sCol, length: length))
+          inFromLine = true; lastKeyword = ""
+        elif lastKeyword == "def":
+          let isMethod = inClassScopeLocal(scopeStack)
+          if isMethod:
+            tokens.add(PythonToken(kind: ptMethod, line: sLine, col: sCol, length: length))
+          else:
+            tokens.add(PythonToken(kind: ptFunction, line: sLine, col: sCol, length: length))
+          scopeStack.add(ScopeEntry(kind: skFunction, indent: lineIndent))
+          lastKeyword = ""
+          inFuncParams = false; funcParamDepth = 0
+          isFirstParam = true; afterParamColon = false; expectParam = false
+        elif lastKeyword == "class":
+          tokens.add(PythonToken(kind: ptClass, line: sLine, col: sCol, length: length))
+          scopeStack.add(ScopeEntry(kind: skClass, indent: lineIndent))
+          lastKeyword = ""
+        elif inFuncParams and not afterParamColon:
+          if (word == "self") and isFirstParam:
+            tokens.add(PythonToken(kind: ptSelfParam, line: sLine, col: sCol, length: length))
+          elif (word == "cls") and isFirstParam:
+            tokens.add(PythonToken(kind: ptClsParam, line: sLine, col: sCol, length: length))
+          else:
+            tokens.add(PythonToken(kind: ptParameter, line: sLine, col: sCol, length: length))
+          expectParam = false; isFirstParam = false
+        elif inImportLine:
+          tokens.add(PythonToken(kind: ptNamespace, line: sLine, col: sCol, length: length))
+        elif inFromLine:
+          tokens.add(PythonToken(kind: ptNamespace, line: sLine, col: sCol, length: length))
+        elif wasDot:
+          var lookPos = pos
+          while lookPos < text.len and text[lookPos] in {' ', '\t'}: inc lookPos
+          if lookPos < text.len and text[lookPos] == '(':
+            tokens.add(PythonToken(kind: ptFunction, line: sLine, col: sCol, length: length))
+          else:
+            tokens.add(PythonToken(kind: ptProperty, line: sLine, col: sCol, length: length))
+        elif localBuiltinConstSet.hasKey(word):
+          tokens.add(PythonToken(kind: ptBuiltinConst, line: sLine, col: sCol, length: length))
+        elif localKwOperatorSet.hasKey(word):
+          tokens.add(PythonToken(kind: ptOperator, line: sLine, col: sCol, length: length))
+        elif localKeywordSet.hasKey(word):
+          tokens.add(PythonToken(kind: ptKeyword, line: sLine, col: sCol, length: length))
+        elif localBuiltinTypeSet.hasKey(word):
+          tokens.add(PythonToken(kind: ptType, line: sLine, col: sCol, length: length))
+        elif localBuiltinFuncSet.hasKey(word):
+          tokens.add(PythonToken(kind: ptBuiltin, line: sLine, col: sCol, length: length))
+        else:
+          var lookPos = pos
+          while lookPos < text.len and text[lookPos] in {' ', '\t'}: inc lookPos
+          if lookPos < text.len and text[lookPos] == '(':
+            tokens.add(PythonToken(kind: ptFunction, line: sLine, col: sCol, length: length))
+          lastKeyword = ""
+
+    # Regular strings
+    of '"', '\'':
+      lastKeyword = ""; afterDot = false
+      let quoteChar = c
+      let sLine = line; let sCol = col; let stringStartPos = pos
+      var strLen = 0
+      let isTriple = pos + 2 < text.len and text[pos + 1] == quoteChar and text[pos + 2] == quoteChar
+      if isTriple:
+        for _ in 0..<3: advance(); inc strLen
+        while pos < text.len:
+          if text[pos] == '\\':
+            advance(); inc strLen
+            if pos < text.len: advance(); inc strLen
+          elif text[pos] == quoteChar and pos + 2 < text.len and
+               text[pos + 1] == quoteChar and text[pos + 2] == quoteChar:
+            for _ in 0..<3: advance(); inc strLen
+            break
+          else:
+            advance(); inc strLen
+      else:
+        advance(); inc strLen  # opening quote
+        while pos < text.len:
+          if text[pos] == '\\':
+            advance(); inc strLen
+            if pos < text.len: advance(); inc strLen
+          elif text[pos] == quoteChar:
+            advance(); inc strLen; break
+          elif text[pos] == '\n': break
+          else:
+            advance(); inc strLen
+      emitStringTokens(tokens, text, stringStartPos, pos, sLine, sCol, line)
+
+    # Numbers
+    of '0'..'9':
+      lastKeyword = ""; afterDot = false
+      let sLine = line; let sCol = col; var length = 0
+      if c == '0' and pos + 1 < text.len and text[pos + 1] in {'x', 'X'}:
+        advance(); advance(); length = 2
+        while pos < text.len and text[pos] in {'0'..'9', 'a'..'f', 'A'..'F', '_'}:
+          advance(); inc length
+      elif c == '0' and pos + 1 < text.len and text[pos + 1] in {'o', 'O'}:
+        advance(); advance(); length = 2
+        while pos < text.len and text[pos] in {'0'..'7', '_'}:
+          advance(); inc length
+      elif c == '0' and pos + 1 < text.len and text[pos + 1] in {'b', 'B'}:
+        advance(); advance(); length = 2
+        while pos < text.len and text[pos] in {'0', '1', '_'}:
+          advance(); inc length
+      else:
+        while pos < text.len and text[pos] in {'0'..'9', '_'}:
+          advance(); inc length
+        if pos < text.len and text[pos] == '.':
+          advance(); inc length
+          while pos < text.len and text[pos] in {'0'..'9', '_'}:
+            advance(); inc length
+        if pos < text.len and text[pos] in {'e', 'E'}:
+          advance(); inc length
+          if pos < text.len and text[pos] in {'+', '-'}:
+            advance(); inc length
+          while pos < text.len and text[pos] in {'0'..'9', '_'}:
+            advance(); inc length
+      if pos < text.len and text[pos] in {'j', 'J'}:
+        advance(); inc length
+      tokens.add(PythonToken(kind: ptNumber, line: sLine, col: sCol, length: length))
+
+    # Dot
+    of '.':
+      lastKeyword = ""
+      if pos + 1 < text.len and text[pos + 1] in {'0'..'9'}:
+        afterDot = false
+        let sLine = line; let sCol = col; var length = 0
+        advance(); inc length
+        while pos < text.len and text[pos] in {'0'..'9', '_'}:
+          advance(); inc length
+        if pos < text.len and text[pos] in {'e', 'E'}:
+          advance(); inc length
+          if pos < text.len and text[pos] in {'+', '-'}:
+            advance(); inc length
+          while pos < text.len and text[pos] in {'0'..'9', '_'}:
+            advance(); inc length
+        if pos < text.len and text[pos] in {'j', 'J'}:
+          advance(); inc length
+        tokens.add(PythonToken(kind: ptNumber, line: sLine, col: sCol, length: length))
+      else:
+        afterDot = true; advance()
+
+    # Decorators
+    of '@':
+      lastKeyword = ""; afterDot = false
+      let sLine = line; let sCol = col; advance(); var length = 1
+      while pos < text.len and (isIdentCharStatic(text[pos]) or text[pos] == '.'):
+        advance(); inc length
+      if length > 1:
+        tokens.add(PythonToken(kind: ptDecorator, line: sLine, col: sCol, length: length))
+
+    # Parentheses
+    of '(':
+      lastKeyword = ""; afterDot = false
+      if inFuncParams: inc funcParamDepth
+      elif funcParamDepth == 0 and tokens.len > 0 and
+           tokens[^1].kind in {ptFunction, ptMethod}:
+        inFuncParams = true; funcParamDepth = 1
+        isFirstParam = true; afterParamColon = false; expectParam = false
+      advance()
+    of ')':
+      lastKeyword = ""; afterDot = false
+      if inFuncParams:
+        dec funcParamDepth
+        if funcParamDepth <= 0: inFuncParams = false; funcParamDepth = 0
+      advance()
+    of ',':
+      lastKeyword = ""; afterDot = false
+      if inFuncParams: afterParamColon = false; expectParam = false
+      advance()
+    of ':':
+      lastKeyword = ""; afterDot = false
+      if inFuncParams and funcParamDepth == 1: afterParamColon = true
+      advance()
+
+    # Star / double star
+    of '*':
+      lastKeyword = ""; afterDot = false
+      let sLine = line; let sCol = col
+      advance(); var length = 1
+      if pos < text.len and text[pos] == '*':
+        advance(); inc length
+        if pos < text.len and text[pos] == '=':
+          advance(); inc length
+      elif pos < text.len and text[pos] == '=':
+        advance(); inc length
+      if inFuncParams and funcParamDepth == 1:
+        expectParam = true
+      else:
+        tokens.add(PythonToken(kind: ptOperator, line: sLine, col: sCol, length: length))
+
+    # Operators
+    of '=':
+      lastKeyword = ""; afterDot = false
+      let sLine = line; let sCol = col
+      advance(); var length = 1
+      if pos < text.len and text[pos] == '=':
+        advance(); inc length
+      if inFuncParams and funcParamDepth == 1 and length == 1:
+        afterParamColon = true
+      else:
+        tokens.add(PythonToken(kind: ptOperator, line: sLine, col: sCol, length: length))
+    of '!':
+      lastKeyword = ""; afterDot = false
+      let sLine = line; let sCol = col
+      advance(); var length = 1
+      if pos < text.len and text[pos] == '=': advance(); inc length
+      tokens.add(PythonToken(kind: ptOperator, line: sLine, col: sCol, length: length))
+    of '<':
+      lastKeyword = ""; afterDot = false
+      let sLine = line; let sCol = col
+      advance(); var length = 1
+      if pos < text.len and text[pos] in {'=', '<'}: advance(); inc length
+      tokens.add(PythonToken(kind: ptOperator, line: sLine, col: sCol, length: length))
+    of '>':
+      lastKeyword = ""; afterDot = false
+      let sLine = line; let sCol = col
+      advance(); var length = 1
+      if pos < text.len and text[pos] in {'=', '>'}: advance(); inc length
+      tokens.add(PythonToken(kind: ptOperator, line: sLine, col: sCol, length: length))
+    of '+', '%', '&', '|', '^', '~':
+      lastKeyword = ""; afterDot = false
+      let sLine = line; let sCol = col
+      advance(); var length = 1
+      if pos < text.len and text[pos] == '=': advance(); inc length
+      tokens.add(PythonToken(kind: ptOperator, line: sLine, col: sCol, length: length))
+    of '-':
+      lastKeyword = ""; afterDot = false
+      let sLine = line; let sCol = col
+      advance(); var length = 1
+      if pos < text.len and text[pos] == '>':
+        advance(); inc length
+      elif pos < text.len and text[pos] == '=':
+        advance(); inc length
+      tokens.add(PythonToken(kind: ptOperator, line: sLine, col: sCol, length: length))
+    of '/':
+      lastKeyword = ""; afterDot = false
+      let sLine = line; let sCol = col
+      advance(); var length = 1
+      if pos < text.len and text[pos] == '/':
+        advance(); inc length
+        if pos < text.len and text[pos] == '=': advance(); inc length
+      elif pos < text.len and text[pos] == '=':
+        advance(); inc length
+      tokens.add(PythonToken(kind: ptOperator, line: sLine, col: sCol, length: length))
+
+    of '[', ']', '{', '}', ';', '\\':
+      lastKeyword = ""; afterDot = false; advance()
+    else:
+      lastKeyword = ""; afterDot = false; advance()
+
+  pythonSectionChannels[args.chanIdx].send(tokens)
+
+proc tokenizePythonParallel(text: string): (seq[PythonToken], seq[DiagInfo]) =
+  if text.len == 0: return (@[], @[])
+
+  var lineOffsets: seq[int] = @[0]
+  for i in 0..<text.len:
+    if text[i] == '\n': lineOffsets.add(i + 1)
+  let totalLines = lineOffsets.len
+
+  if totalLines < ParallelLineThreshold:
+    return tokenizePython(text)
+
+  let threadCount = min(cpuinfo.countProcessors(), MaxTokenThreads)
+  if threadCount <= 1:
+    return tokenizePython(text)
+
+  let textPtr = cast[ptr UncheckedArray[char]](unsafeAddr text[0])
+  let linesPerSection = totalLines div threadCount
+
+  # Pre-scan to determine state at each section boundary
+  var states: seq[PythonTokenizerState] = @[PythonTokenizerState()]
+  for t in 0..<threadCount - 1:
+    let sLine = t * linesPerSection
+    let eLine = (t + 1) * linesPerSection - 1
+    let startPos = lineOffsets[sLine]
+    let endPos = if eLine + 1 < lineOffsets.len: lineOffsets[eLine + 1] else: text.len
+    states.add(preScanPythonState(text, startPos, endPos, states[t]))
+
+  for t in 0..<threadCount:
+    let sLine = t * linesPerSection
+    let eLine = if t == threadCount - 1: totalLines - 1
+                else: (t + 1) * linesPerSection - 1
+    let startPos = lineOffsets[sLine]
+    let endPos = if eLine + 1 < lineOffsets.len: lineOffsets[eLine + 1] else: text.len
+    pythonSectionChannels[t].open()
+    createThread(pythonSectionThreads[t], pythonSectionWorker, PythonSectionArgs(
+      textPtr: textPtr, textLen: text.len,
+      startPos: startPos, endPos: endPos,
+      startLine: sLine, initState: states[t], chanIdx: t
+    ))
+
+  var allTokens: seq[PythonToken] = @[]
+  for t in 0..<threadCount:
+    joinThread(pythonSectionThreads[t])
+    let (hasData, sectionTokens) = pythonSectionChannels[t].tryRecv()
+    if hasData: allTokens.add(sectionTokens)
+    pythonSectionChannels[t].close()
+
+  # Diagnostics are empty for parallel mode (skip for large files)
+  return (allTokens, @[])
 
 # ---------------------------------------------------------------------------
 # Python Tokenizer + Diagnostics (with context tracking)
@@ -665,6 +1259,15 @@ proc encodeSemanticTokens(tokens: seq[PythonToken]): seq[int] =
 
 proc tokenizePythonRange(text: string, startLine, endLine: int): seq[PythonToken] =
   ## Tokenize only lines [startLine..endLine].
+  ## Uses parallel tokenizer for large files, falls back to full scan for small.
+  let (allTokens, _) = tokenizePythonParallel(text)
+  result = @[]
+  for tok in allTokens:
+    if tok.line >= startLine and tok.line <= endLine:
+      result.add(tok)
+
+proc tokenizePythonRangeFull(text: string, startLine, endLine: int): seq[PythonToken] =
+  ## Tokenize only lines [startLine..endLine] using full sequential scan.
   ## Scans from the beginning to track context (scope, multi-line strings),
   ## but only emits tokens for lines in the requested range.
   result = @[]
@@ -1554,7 +2157,7 @@ proc main() =
       var text = ""
       for doc in documents:
         if doc.uri == uri: text = doc.text; break
-      let (tokens, _) = tokenizePython(text)
+      let (tokens, _) = tokenizePythonParallel(text)
       let data = encodeSemanticTokens(tokens)
       var dataJson = newJArray()
       for v in data: dataJson.add(%v)
