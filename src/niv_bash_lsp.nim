@@ -69,7 +69,7 @@ proc isWordChar(c: char): bool =
 proc isDigit(c: char): bool =
   c in {'0'..'9'}
 
-proc tokenizeBash(text: string): seq[BashToken] =
+proc tokenizeBash(text: string, startLine: int = 0, endLine: int = int.high): seq[BashToken] =
   var tokens: seq[BashToken]
   var pos = 0
   var line = 0
@@ -98,6 +98,7 @@ proc tokenizeBash(text: string): seq[BashToken] =
   var afterNewline = true
 
   while pos < text.len:
+    if line > endLine: break
     let c = ch()
 
     # Newline
@@ -393,6 +394,10 @@ proc tokenizeBash(text: string): seq[BashToken] =
     advance()
     afterNewline = false
 
+  if startLine > 0 and tokens.len > 0:
+    var i = 0
+    while i < tokens.len and tokens[i].line < startLine: inc i
+    if i > 0: tokens = tokens[i..^1]
   return tokens
 
 # ---------------------------------------------------------------------------
@@ -400,11 +405,7 @@ proc tokenizeBash(text: string): seq[BashToken] =
 # ---------------------------------------------------------------------------
 
 proc tokenizeBashRange(text: string, startLine, endLine: int): seq[BashToken] =
-  let allTokens = tokenizeBash(text)
-  result = @[]
-  for tok in allTokens:
-    if tok.line >= startLine and tok.line <= endLine:
-      result.add(tok)
+  tokenizeBash(text, startLine, endLine)
 
 # ---------------------------------------------------------------------------
 # Semantic Token Encoding (LSP delta encoding)

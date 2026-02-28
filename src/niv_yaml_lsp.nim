@@ -266,7 +266,7 @@ proc tokenizeValue(tokens: var seq[YamlToken], line: string, lineNum, valStart, 
     tokens.add(YamlToken(kind: ytNumber, line: lineNum, col: pos, length: end2 - pos))
     return
 
-proc tokenizeYaml(text: string): seq[YamlToken] =
+proc tokenizeYaml(text: string, startLine: int = 0, endLine: int = int.high): seq[YamlToken] =
   var tokens: seq[YamlToken]
   let lines = text.split('\n')
 
@@ -275,6 +275,7 @@ proc tokenizeYaml(text: string): seq[YamlToken] =
   var blockStartLine = -1
 
   for lineNum in 0..<lines.len:
+    if lineNum > endLine: break
     let line = lines[lineNum]
     if line.len == 0:
       if inBlockScalar:
@@ -517,6 +518,10 @@ proc tokenizeYaml(text: string): seq[YamlToken] =
         if valStart < valEnd:
           tokenizeValue(tokens, line, lineNum, valStart, valEnd)
 
+  if startLine > 0 and tokens.len > 0:
+    var i = 0
+    while i < tokens.len and tokens[i].line < startLine: inc i
+    if i > 0: tokens = tokens[i..^1]
   return tokens
 
 # ---------------------------------------------------------------------------
@@ -524,11 +529,7 @@ proc tokenizeYaml(text: string): seq[YamlToken] =
 # ---------------------------------------------------------------------------
 
 proc tokenizeYamlRange(text: string, startLine, endLine: int): seq[YamlToken] =
-  let allTokens = tokenizeYaml(text)
-  result = @[]
-  for tok in allTokens:
-    if tok.line >= startLine and tok.line <= endLine:
-      result.add(tok)
+  tokenizeYaml(text, startLine, endLine)
 
 # ---------------------------------------------------------------------------
 # Semantic Token Encoding (LSP delta encoding)

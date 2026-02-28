@@ -61,7 +61,7 @@ proc isHorizontalRule(line: string, pos: int): bool =
     inc i
   return count >= 3
 
-proc tokenizeMd(text: string): seq[MdToken] =
+proc tokenizeMd(text: string, startLine: int = 0, endLine: int = int.high): seq[MdToken] =
   var tokens: seq[MdToken]
   let lines = text.split('\n')
   var inFencedCode = false
@@ -74,6 +74,7 @@ proc tokenizeMd(text: string): seq[MdToken] =
   var lineIndex = 0
 
   for lineNum in 0..<lines.len:
+    if lineNum > endLine: break
     let line = lines[lineNum]
     inc lineIndex
 
@@ -411,6 +412,10 @@ proc tokenizeMd(text: string): seq[MdToken] =
 
       inc pos
 
+  if startLine > 0 and tokens.len > 0:
+    var i = 0
+    while i < tokens.len and tokens[i].line < startLine: inc i
+    if i > 0: tokens = tokens[i..^1]
   return tokens
 
 # ---------------------------------------------------------------------------
@@ -418,11 +423,7 @@ proc tokenizeMd(text: string): seq[MdToken] =
 # ---------------------------------------------------------------------------
 
 proc tokenizeMdRange(text: string, startLine, endLine: int): seq[MdToken] =
-  let allTokens = tokenizeMd(text)
-  result = @[]
-  for tok in allTokens:
-    if tok.line >= startLine and tok.line <= endLine:
-      result.add(tok)
+  tokenizeMd(text, startLine, endLine)
 
 # ---------------------------------------------------------------------------
 # Semantic Token Encoding (LSP delta encoding)

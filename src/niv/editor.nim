@@ -155,42 +155,45 @@ proc handleLspEvents(state: var EditorState): bool =
         except JsonParsingError:
           state.statusMessage = "LSP: invalid definition response"
       of "textDocument/semanticTokens/range":
-        try:
-          let resultNode = parseJson(event.responseJson)
-          if resultNode.hasKey("data"):
-            var data: seq[int]
-            for v in resultNode["data"]:
-              data.add(v.getInt())
-            if semanticLines.len < state.buffer.lineCount:
-              semanticLines.setLen(state.buffer.lineCount)
-            # Replace tokens: clear each line before adding fresh tokens
-            var currentLine = 0
-            var currentCol = 0
-            var lastClearedLine = -1
-            var i = 0
-            while i + 4 < data.len:
-              let deltaLine = data[i]
-              let deltaStart = data[i + 1]
-              let length = data[i + 2]
-              let tokenType = data[i + 3]
-              i += 5
-              if deltaLine > 0:
-                currentLine += deltaLine
-                currentCol = deltaStart
-              else:
-                currentCol += deltaStart
-              if currentLine < semanticLines.len:
-                # Clear line on first encounter — replace stale tokens
-                if currentLine != lastClearedLine:
-                  semanticLines[currentLine] = @[]
-                  lastClearedLine = currentLine
-                semanticLines[currentLine].add(SemanticToken(
-                  col: currentCol,
-                  length: length,
-                  tokenType: tokenType,
-                ))
-        except JsonParsingError:
-          discard
+        # Direct parse: find "data":[ and extract numbers without JSON overhead
+        let dataKey = "\"data\":["
+        let dataIdx = event.responseJson.find(dataKey)
+        if dataIdx >= 0:
+          if semanticLines.len < state.buffer.lineCount:
+            semanticLines.setLen(state.buffer.lineCount)
+          var currentLine = 0
+          var currentCol = 0
+          var lastClearedLine = -1
+          var p = dataIdx + dataKey.len
+          let s = event.responseJson
+          while p < s.len and s[p] != ']':
+            var vals: array[5, int]
+            var gotAll = true
+            for vi in 0..4:
+              while p < s.len and s[p] in {' ', ','}: inc p
+              if p >= s.len or s[p] == ']':
+                gotAll = false
+                break
+              var num = 0
+              while p < s.len and s[p] in {'0'..'9'}:
+                num = num * 10 + (ord(s[p]) - ord('0'))
+                inc p
+              vals[vi] = num
+            if not gotAll: break
+            if vals[0] > 0:
+              currentLine += vals[0]
+              currentCol = vals[1]
+            else:
+              currentCol += vals[1]
+            if currentLine < semanticLines.len:
+              if currentLine != lastClearedLine:
+                semanticLines[currentLine] = @[]
+                lastClearedLine = currentLine
+              semanticLines[currentLine].add(SemanticToken(
+                col: currentCol,
+                length: vals[2],
+                tokenType: vals[3],
+              ))
         if event.requestId == bgHighlightRequestId:
           bgHighlightRequestId = -1
         trySendBgHighlight()

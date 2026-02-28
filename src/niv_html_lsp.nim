@@ -49,7 +49,7 @@ proc isNameChar(c: char): bool =
 proc isNameStart(c: char): bool =
   c in {'A'..'Z', 'a'..'z', '_', ':'}
 
-proc tokenizeHtml(text: string): seq[HtmlToken] =
+proc tokenizeHtml(text: string, startLine: int = 0, endLine: int = int.high): seq[HtmlToken] =
   var tokens: seq[HtmlToken]
   var pos = 0
   var line = 0
@@ -85,6 +85,7 @@ proc tokenizeHtml(text: string): seq[HtmlToken] =
     return 0
 
   while pos < text.len:
+    if line > endLine: break
     let c = ch()
 
     # Comment <!-- ... -->
@@ -403,6 +404,10 @@ proc tokenizeHtml(text: string): seq[HtmlToken] =
     # Regular text — skip
     advance()
 
+  if startLine > 0 and tokens.len > 0:
+    var i = 0
+    while i < tokens.len and tokens[i].line < startLine: inc i
+    if i > 0: tokens = tokens[i..^1]
   return tokens
 
 # ---------------------------------------------------------------------------
@@ -410,11 +415,7 @@ proc tokenizeHtml(text: string): seq[HtmlToken] =
 # ---------------------------------------------------------------------------
 
 proc tokenizeHtmlRange(text: string, startLine, endLine: int): seq[HtmlToken] =
-  let allTokens = tokenizeHtml(text)
-  result = @[]
-  for tok in allTokens:
-    if tok.line >= startLine and tok.line <= endLine:
-      result.add(tok)
+  tokenizeHtml(text, startLine, endLine)
 
 # ---------------------------------------------------------------------------
 # Semantic Token Encoding (LSP delta encoding)

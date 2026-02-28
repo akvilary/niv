@@ -47,7 +47,7 @@ const
 proc isBareKeyChar(c: char): bool =
   c in {'A'..'Z', 'a'..'z', '0'..'9', '_', '-'}
 
-proc tokenizeToml(text: string): seq[TomlToken] =
+proc tokenizeToml(text: string, startLine: int = 0, endLine: int = int.high): seq[TomlToken] =
   var tokens: seq[TomlToken]
   var pos = 0
   var line = 0
@@ -113,6 +113,7 @@ proc tokenizeToml(text: string): seq[TomlToken] =
       tokens.add(TomlToken(kind: kind, line: ln, col: actualCol, length: remaining))
 
   while pos < text.len:
+    if line > endLine: break
     # Skip whitespace (not newlines)
     skipWhitespace()
     if pos >= text.len: break
@@ -437,6 +438,10 @@ proc tokenizeToml(text: string): seq[TomlToken] =
     # Skip any other character
     advance()
 
+  if startLine > 0 and tokens.len > 0:
+    var i = 0
+    while i < tokens.len and tokens[i].line < startLine: inc i
+    if i > 0: tokens = tokens[i..^1]
   return tokens
 
 # ---------------------------------------------------------------------------
@@ -444,12 +449,7 @@ proc tokenizeToml(text: string): seq[TomlToken] =
 # ---------------------------------------------------------------------------
 
 proc tokenizeTomlRange(text: string, startLine, endLine: int): seq[TomlToken] =
-  ## Tokenize full text but only emit tokens in [startLine..endLine]
-  let allTokens = tokenizeToml(text)
-  result = @[]
-  for tok in allTokens:
-    if tok.line >= startLine and tok.line <= endLine:
-      result.add(tok)
+  tokenizeToml(text, startLine, endLine)
 
 # ---------------------------------------------------------------------------
 # Semantic Token Encoding (LSP delta encoding)

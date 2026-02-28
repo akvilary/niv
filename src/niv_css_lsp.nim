@@ -107,7 +107,7 @@ proc isHexDigit(c: char): bool =
 proc isTagName(word: string): bool =
   word in cssTagNameSet
 
-proc tokenizeCss(text: string): seq[CssToken] =
+proc tokenizeCss(text: string, startLine: int = 0, endLine: int = int.high): seq[CssToken] =
   var tokens: seq[CssToken]
   var pos = 0
   var line = 0
@@ -133,6 +133,7 @@ proc tokenizeCss(text: string): seq[CssToken] =
       inc pos
 
   while pos < text.len:
+    if line > endLine: break
     let c = ch()
 
     # Newline
@@ -435,6 +436,10 @@ proc tokenizeCss(text: string): seq[CssToken] =
     # Skip unknown characters
     advance()
 
+  if startLine > 0 and tokens.len > 0:
+    var i = 0
+    while i < tokens.len and tokens[i].line < startLine: inc i
+    if i > 0: tokens = tokens[i..^1]
   return tokens
 
 # ---------------------------------------------------------------------------
@@ -442,11 +447,7 @@ proc tokenizeCss(text: string): seq[CssToken] =
 # ---------------------------------------------------------------------------
 
 proc tokenizeCssRange(text: string, startLine, endLine: int): seq[CssToken] =
-  let allTokens = tokenizeCss(text)
-  result = @[]
-  for tok in allTokens:
-    if tok.line >= startLine and tok.line <= endLine:
-      result.add(tok)
+  tokenizeCss(text, startLine, endLine)
 
 # ---------------------------------------------------------------------------
 # Semantic Token Encoding (LSP delta encoding)

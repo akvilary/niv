@@ -170,7 +170,7 @@ proc emitMultiLineTokens(tokens: var seq[NimToken], kind: NimTokenKind,
 # Nim Tokenizer (full file)
 # ---------------------------------------------------------------------------
 
-proc tokenizeNim(text: string): (seq[NimToken], seq[DiagInfo]) =
+proc tokenizeNim(text: string, startLine: int = 0, endLine: int = int.high): (seq[NimToken], seq[DiagInfo]) =
   var tokens: seq[NimToken]
   var diags: seq[DiagInfo]
 
@@ -223,6 +223,7 @@ proc tokenizeNim(text: string): (seq[NimToken], seq[DiagInfo]) =
   while pos < text.len:
     skipWhitespace()
     if pos >= text.len: break
+    if line > endLine and not inFuncParams: break
     let c = ch()
 
     case c
@@ -646,6 +647,10 @@ proc tokenizeNim(text: string): (seq[NimToken], seq[DiagInfo]) =
     else:
       advance()
 
+  if startLine > 0 and tokens.len > 0:
+    var i = 0
+    while i < tokens.len and tokens[i].line < startLine: inc i
+    if i > 0: tokens = tokens[i..^1]
   return (tokens, diags)
 
 # ---------------------------------------------------------------------------
@@ -653,309 +658,8 @@ proc tokenizeNim(text: string): (seq[NimToken], seq[DiagInfo]) =
 # ---------------------------------------------------------------------------
 
 proc tokenizeNimRange(text: string, startLine, endLine: int): seq[NimToken] =
-  var pos = 0
-  var line = 0
-  var col = 0
-  var lastKeyword = ""
-
-  var inFuncParams = false
-  var funcParamDepth = 0
-  var afterParamColon = false
-  var afterDot = false
-  var inImportLine = false
-  var inFromLine = false
-  var inTypeSection {.used.} = false
-  var afterTypeEquals = false
-  var inEnumBody = false
-  var enumIndent = 0
-
-  proc isIdentChar(c: char): bool =
-    c in {'a'..'z', 'A'..'Z', '0'..'9', '_'}
-
-  template ch(): char =
-    if pos < text.len: text[pos] else: '\0'
-
-  template advance() =
-    if pos < text.len:
-      if text[pos] == '\n':
-        inc line; col = 0
-        lastKeyword = ""; inImportLine = false
-        inFromLine = false; afterDot = false; afterTypeEquals = false
-      else: inc col
-      inc pos
-
-  template skipWS() =
-    while pos < text.len and text[pos] in {' ', '\t', '\r', '\n'}:
-      advance()
-
-  template inRange(): bool =
-    line >= startLine and line <= endLine
-
-  while pos < text.len:
-    skipWS()
-    if pos >= text.len: break
-    if line > endLine and not inFuncParams: break
-    let c = ch()
-
-    case c
-    of '#':
-      let sLine = line; let sCol = col; let startPos = pos
-      if pos + 1 < text.len and text[pos + 1] == '[':
-        advance(); advance()
-        var depth = 1
-        while pos < text.len and depth > 0:
-          if pos + 1 < text.len and text[pos] == '#' and text[pos + 1] == '[':
-            inc depth; advance(); advance()
-          elif pos + 1 < text.len and text[pos] == ']' and text[pos + 1] == '#':
-            dec depth; advance(); advance()
-          else: advance()
-        emitMultiLineTokens(result, ntComment, text, startPos, pos, sLine, sCol, line,
-                             startLine, endLine)
-      else:
-        var length = 0
-        while pos < text.len and text[pos] != '\n':
-          advance(); inc length
-        if inRange():
-          result.add(NimToken(kind: ntComment, line: sLine, col: sCol, length: length))
-
-    of '"':
-      lastKeyword = ""; afterDot = false
-      let sLine = line; let sCol = col; let startPos = pos
-      if pos + 2 < text.len and text[pos + 1] == '"' and text[pos + 2] == '"':
-        advance(); advance(); advance()
-        while pos < text.len:
-          if pos + 2 < text.len and text[pos] == '"' and text[pos + 1] == '"' and text[pos + 2] == '"':
-            advance(); advance(); advance(); break
-          advance()
-        emitMultiLineTokens(result, ntString, text, startPos, pos, sLine, sCol, line,
-                             startLine, endLine)
-      else:
-        advance()
-        while pos < text.len:
-          if text[pos] == '\\': advance(); (if pos < text.len: advance())
-          elif text[pos] == '"': advance(); break
-          elif text[pos] == '\n': break
-          else: advance()
-        if inRange():
-          result.add(NimToken(kind: ntString, line: sLine, col: sCol, length: pos - startPos))
-
-    of '\'':
-      let prevIsAlnum = pos > 0 and text[pos - 1] in {'a'..'z', 'A'..'Z', '0'..'9', '_'}
-      if prevIsAlnum:
-        advance()
-        while pos < text.len and isIdentChar(text[pos]): advance()
-      else:
-        lastKeyword = ""; afterDot = false
-        let sLine = line; let sCol = col
-        advance()
-        if pos < text.len and text[pos] == '\\':
-          advance(); (if pos < text.len: advance())
-        elif pos < text.len: advance()
-        if pos < text.len and text[pos] == '\'': advance()
-        if inRange():
-          result.add(NimToken(kind: ntString, line: sLine, col: sCol, length: col - sCol))
-
-    of '0'..'9':
-      lastKeyword = ""; afterDot = false
-      let sLine = line; let sCol = col; let startPos = pos
-      if c == '0' and pos + 1 < text.len and text[pos + 1] in {'x', 'X'}:
-        advance(); advance()
-        while pos < text.len and text[pos] in {'0'..'9', 'a'..'f', 'A'..'F', '_'}: advance()
-      elif c == '0' and pos + 1 < text.len and text[pos + 1] in {'o', 'O'}:
-        advance(); advance()
-        while pos < text.len and text[pos] in {'0'..'7', '_'}: advance()
-      elif c == '0' and pos + 1 < text.len and text[pos + 1] in {'b', 'B'}:
-        advance(); advance()
-        while pos < text.len and text[pos] in {'0', '1', '_'}: advance()
-      else:
-        while pos < text.len and text[pos] in {'0'..'9', '_'}: advance()
-        if pos < text.len and text[pos] == '.' and pos + 1 < text.len and text[pos + 1] in {'0'..'9'}:
-          advance()
-          while pos < text.len and text[pos] in {'0'..'9', '_'}: advance()
-        if pos < text.len and text[pos] in {'e', 'E'}:
-          advance()
-          if pos < text.len and text[pos] in {'+', '-'}: advance()
-          while pos < text.len and text[pos] in {'0'..'9', '_'}: advance()
-      if pos < text.len and text[pos] == '\'':
-        advance()
-        while pos < text.len and isIdentChar(text[pos]): advance()
-      if inRange():
-        result.add(NimToken(kind: ntNumber, line: sLine, col: sCol, length: pos - startPos))
-
-    of 'a'..'z', 'A'..'Z', '_':
-      let sLine = line; let sCol = col; let startPos = pos
-      let wasDot = afterDot; afterDot = false
-
-      # Raw string check
-      if c in {'r', 'R'} and pos + 1 < text.len and text[pos + 1] == '"':
-        advance()
-        let strStart = startPos
-        if pos + 2 < text.len and text[pos] == '"' and text[pos + 1] == '"' and text[pos + 2] == '"':
-          advance(); advance(); advance()
-          while pos < text.len:
-            if pos + 2 < text.len and text[pos] == '"' and text[pos + 1] == '"' and text[pos + 2] == '"':
-              advance(); advance(); advance(); break
-            advance()
-          emitMultiLineTokens(result, ntString, text, strStart, pos, sLine, sCol, line,
-                               startLine, endLine)
-        else:
-          advance()
-          while pos < text.len and text[pos] != '"' and text[pos] != '\n': advance()
-          if pos < text.len and text[pos] == '"': advance()
-          if inRange():
-            result.add(NimToken(kind: ntString, line: sLine, col: sCol, length: pos - strStart))
-        continue
-
-      while pos < text.len and isIdentChar(text[pos]): advance()
-      let word = text[startPos..<pos]
-      let length = pos - startPos
-      if pos < text.len and text[pos] == '*': advance()
-
-      # Classify (same logic as full tokenizer)
-      if lastKeyword in ["proc", "func", "iterator", "converter"]:
-        if inRange(): result.add(NimToken(kind: ntFunction, line: sLine, col: sCol, length: length))
-        lastKeyword = ""
-        skipWS()
-        if pos < text.len and text[pos] == '[':
-          advance(); var d = 1
-          while pos < text.len and d > 0:
-            if text[pos] == '[': inc d elif text[pos] == ']': dec d
-            advance()
-        skipWS()
-        if pos < text.len and text[pos] == '(':
-          inFuncParams = true; funcParamDepth = 1; afterParamColon = false; advance()
-      elif lastKeyword == "method":
-        if inRange(): result.add(NimToken(kind: ntMethod, line: sLine, col: sCol, length: length))
-        lastKeyword = ""
-        skipWS()
-        if pos < text.len and text[pos] == '[':
-          advance(); var d = 1
-          while pos < text.len and d > 0:
-            if text[pos] == '[': inc d elif text[pos] == ']': dec d
-            advance()
-        skipWS()
-        if pos < text.len and text[pos] == '(':
-          inFuncParams = true; funcParamDepth = 1; afterParamColon = false; advance()
-      elif lastKeyword in ["template", "macro"]:
-        if inRange(): result.add(NimToken(kind: ntMacro, line: sLine, col: sCol, length: length))
-        lastKeyword = ""
-        skipWS()
-        if pos < text.len and text[pos] == '[':
-          advance(); var d = 1
-          while pos < text.len and d > 0:
-            if text[pos] == '[': inc d elif text[pos] == ']': dec d
-            advance()
-        skipWS()
-        if pos < text.len and text[pos] == '(':
-          inFuncParams = true; funcParamDepth = 1; afterParamColon = false; advance()
-      elif lastKeyword == "type":
-        if inRange(): result.add(NimToken(kind: ntType, line: sLine, col: sCol, length: length))
-        lastKeyword = ""
-      elif inFuncParams and not afterParamColon:
-        if inRange(): result.add(NimToken(kind: ntParameter, line: sLine, col: sCol, length: length))
-      elif inImportLine or inFromLine:
-        if inRange(): result.add(NimToken(kind: ntNamespace, line: sLine, col: sCol, length: length))
-      elif wasDot:
-        var lookPos = pos
-        while lookPos < text.len and text[lookPos] in {' ', '\t'}: inc lookPos
-        if lookPos < text.len and text[lookPos] == '(':
-          if inRange(): result.add(NimToken(kind: ntFunction, line: sLine, col: sCol, length: length))
-        else:
-          if inRange(): result.add(NimToken(kind: ntProperty, line: sLine, col: sCol, length: length))
-      elif word in builtinConstSet:
-        if inRange(): result.add(NimToken(kind: ntBuiltinConst, line: sLine, col: sCol, length: length))
-      elif word in kwOperatorSet:
-        if inRange(): result.add(NimToken(kind: ntOperator, line: sLine, col: sCol, length: length))
-      elif word in declKeywordSet:
-        if inRange(): result.add(NimToken(kind: ntKeyword, line: sLine, col: sCol, length: length))
-        lastKeyword = word
-      elif word in keywordSet:
-        if inRange(): result.add(NimToken(kind: ntKeyword, line: sLine, col: sCol, length: length))
-        if word == "import": inImportLine = true; (if inFromLine: inFromLine = false)
-        elif word == "from": inFromLine = true
-        elif word in ["include", "export"]: inImportLine = true
-        elif word == "type": lastKeyword = "type"
-        elif word == "enum" and afterTypeEquals:
-          inEnumBody = true
-          let ls = startPos - sCol
-          var bi = 0; var p2 = ls
-          while p2 < text.len and text[p2] in {' ', '\t'}:
-            if text[p2] == '\t': bi += 4 else: inc bi; inc p2
-          enumIndent = bi + 2
-      elif word in builtinTypeSet:
-        if inRange(): result.add(NimToken(kind: ntType, line: sLine, col: sCol, length: length))
-      elif word in builtinFuncSet:
-        if inRange(): result.add(NimToken(kind: ntBuiltinFunc, line: sLine, col: sCol, length: length))
-      elif word[0] in {'A'..'Z'}:
-        if inRange(): result.add(NimToken(kind: ntType, line: sLine, col: sCol, length: length))
-      else:
-        var lookPos = pos
-        while lookPos < text.len and text[lookPos] in {' ', '\t'}: inc lookPos
-        if lookPos < text.len and text[lookPos] == '(':
-          if inRange(): result.add(NimToken(kind: ntFunction, line: sLine, col: sCol, length: length))
-      lastKeyword = if word in declKeywordSet or word == "type": word else: ""
-
-    of '`':
-      lastKeyword = ""
-      let sLine = line; let sCol = col
-      advance()
-      while pos < text.len and text[pos] != '`' and text[pos] != '\n': advance()
-      if pos < text.len and text[pos] == '`': advance()
-      if inRange():
-        result.add(NimToken(kind: ntFunction, line: sLine, col: sCol, length: col - sCol))
-
-    of '{':
-      if pos + 1 < text.len and text[pos + 1] == '.':
-        let sLine = line; let sCol = col; let startPos = pos
-        advance(); advance()
-        while pos < text.len:
-          if pos + 1 < text.len and text[pos] == '.' and text[pos + 1] == '}':
-            advance(); advance(); break
-          elif text[pos] == '\n': break
-          else: advance()
-        emitMultiLineTokens(result, ntDecorator, text, startPos, pos, sLine, sCol, line,
-                             startLine, endLine)
-      else: advance()
-
-    of '.':
-      if pos + 1 < text.len and text[pos + 1] == '.':
-        let sLine = line; let sCol = col
-        advance(); advance()
-        if inRange(): result.add(NimToken(kind: ntOperator, line: sLine, col: sCol, length: 2))
-      else: afterDot = true; advance()
-
-    of '=':
-      afterTypeEquals = true
-      let sLine = line; let sCol = col
-      advance()
-      if pos < text.len and text[pos] == '=': advance()
-      if inRange(): result.add(NimToken(kind: ntOperator, line: sLine, col: sCol, length: col - sCol))
-
-    of '+', '-', '*', '/', '<', '>', '!', '~', '%', '&', '|', '^', '@', '$', '?':
-      lastKeyword = ""; afterDot = false
-      let sLine = line; let sCol = col; let startPos = pos
-      advance()
-      while pos < text.len and text[pos] in {'=', '>', '<', '+', '-', '*', '/', '!', '~', '%', '&', '|', '^', '@', '$', '?'}: advance()
-      if inRange(): result.add(NimToken(kind: ntOperator, line: sLine, col: sCol, length: pos - startPos))
-
-    of '(':
-      if inFuncParams: inc funcParamDepth
-      advance()
-    of ')':
-      if inFuncParams:
-        dec funcParamDepth
-        if funcParamDepth <= 0: inFuncParams = false; funcParamDepth = 0
-      advance()
-    of ',':
-      if inFuncParams: afterParamColon = false
-      advance()
-    of ':':
-      if inFuncParams: afterParamColon = true
-      advance()
-    of ';':
-      if inFuncParams: afterParamColon = false
-      advance()
-    else: advance()
+  let (tokens, _) = tokenizeNim(text, startLine, endLine)
+  return tokens
 
 # ---------------------------------------------------------------------------
 # Semantic Token Encoding
