@@ -264,8 +264,8 @@ proc render*(state: EditorState) =
                         elif bgHighlightTotalLines > 0: bgHighlightTotalLines
                         else: 0
       let pct = min(100, highlighted * 100 div state.buffer.lineCount)
-      " [LSP:" & $pct & "%]"
-    else: " [LSP]"
+      " LSP:" & $pct & "%"
+    else: " LSP"
   let loadingIndicator = if not state.buffer.fullyLoaded and state.buffer.totalSize > 0:
     let pct = int(state.buffer.loadedBytes * 100 div state.buffer.totalSize)
     " [Loading " & $pct & "%]"
@@ -282,7 +282,7 @@ proc render*(state: EditorState) =
     "E:" & $errCount & " W:" & $warnCount & "  "
   else:
     ""
-  let rightPart = lspIndicator & " " & state.buffer.encoding & " " & diagPart & $(state.cursor.line + 1) & ":" & $(state.cursor.col + 1) & " "
+  let rightPart = lspIndicator & " " & state.buffer.encoding & " " & diagPart & $(state.cursor.line + 1) & "/" & $state.buffer.lineCount & ":" & $(state.cursor.col + 1) & " "
 
   let gap = max(totalWidth - leftPart.len - rightPart.len, 0)
   stdout.write(leftPart & spaces(gap) & rightPart)
