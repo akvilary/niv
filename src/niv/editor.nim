@@ -42,12 +42,13 @@ proc syncLspToLine(state: EditorState, targetLine: int) =
   lspSyncedLines = syncTo
 
 proc requestViewportRangeTokens(state: EditorState) =
-  ## Request range tokens for the current viewport if server supports it
+  ## Request range tokens for the current viewport + 1 screen prefetch
   if not lspHasSemanticTokensRange or lspState != lsRunning or tokenLegend.len == 0:
     return
-  let endLine = min(state.viewport.topLine + state.viewport.height,
+  let h = state.viewport.height
+  let startLine = max(0, state.viewport.topLine - h)
+  let endLine = min(state.viewport.topLine + h + h,
                     state.buffer.lineCount) - 1
-  let startLine = state.viewport.topLine
   if startLine == lastRangeTopLine and endLine == lastRangeEndLine:
     return  # Already requested this exact range
   lastRangeTopLine = startLine
