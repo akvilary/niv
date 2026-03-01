@@ -24,6 +24,14 @@ proc handleNormalMode*(state: var EditorState, key: InputKey) =
     cancelCommitInput(state)
     return
 
+  # Escape clears search highlights
+  if key.kind == kkEscape:
+    if state.searchMatches.len > 0:
+      state.searchQuery = ""
+      state.searchMatches = @[]
+      state.searchIndex = 0
+    return
+
   # Sidebar keybindings (checked before input sequence parser)
   if key.kind == kkCtrlKey:
     case key.ctrl

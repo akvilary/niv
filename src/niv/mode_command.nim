@@ -1,6 +1,6 @@
 ## Command-line mode handler
 
-import std/strutils
+import std/[strutils, unicode]
 import types
 import buffer
 import commands
@@ -17,10 +17,10 @@ proc performSearch(state: var EditorState) =
   state.searchMatches = @[]
 
   # Find all matches in the buffer (case-insensitive)
-  let queryLower = query.toLowerAscii()
+  let queryLower = query.toLower()
   for lineIdx in 0..<state.buffer.lineCount:
     let line = state.buffer.getLine(lineIdx)
-    let lineLower = line.toLowerAscii()
+    let lineLower = line.toLower()
     var pos = 0
     while pos < lineLower.len:
       let found = lineLower.find(queryLower, pos)
