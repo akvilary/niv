@@ -136,6 +136,16 @@ proc splitSemanticLine*(lineNum: int, splitCol: int) =
   semanticLines[lineNum] = keepTokens
   semanticLines.insert(moveTokens, lineNum + 1)
 
+proc insertSemanticLine*(lineNum: int) =
+  ## Insert an empty semantic token line at lineNum, shifting lines below down
+  if lineNum <= semanticLines.len:
+    semanticLines.insert(@[], lineNum)
+
+proc deleteSemanticLine*(lineNum: int) =
+  ## Remove semantic token line at lineNum, shifting lines below up
+  if lineNum < semanticLines.len:
+    semanticLines.delete(lineNum)
+
 proc joinSemanticLines*(lineNum: int, joinCol: int) =
   ## After joinLines (Backspace at line start): merge lineNum+1 into lineNum
   if lineNum >= semanticLines.len: return

@@ -125,6 +125,7 @@ proc handleNormalMode*(state: var EditorState, key: InputKey) =
     ))
     state.buffer.undo.commitGroup()
     state.buffer.insertLine(lineNum + 1, "")
+    insertSemanticLine(lineNum + 1)
     state.cursor = Position(line: lineNum + 1, col: 0)
     state.mode = mInsert
   of akInsertLineAbove:
@@ -136,6 +137,7 @@ proc handleNormalMode*(state: var EditorState, key: InputKey) =
     ))
     state.buffer.undo.commitGroup()
     state.buffer.insertLine(lineNum, "")
+    insertSemanticLine(lineNum)
     state.cursor = Position(line: lineNum, col: 0)
     state.mode = mInsert
 
@@ -162,6 +164,7 @@ proc handleNormalMode*(state: var EditorState, key: InputKey) =
     ))
     state.buffer.undo.commitGroup()
     discard state.buffer.deleteLine(state.cursor.line)
+    deleteSemanticLine(state.cursor.line)
     state.cursor = clampCursor(state.buffer, state.cursor, mNormal)
 
   of akYankLine:
@@ -182,6 +185,7 @@ proc handleNormalMode*(state: var EditorState, key: InputKey) =
         ))
         state.buffer.undo.commitGroup()
         state.buffer.insertLine(lineNum, text)
+        insertSemanticLine(lineNum)
         state.cursor = Position(line: lineNum, col: 0)
 
   of akPasteBefore:
@@ -196,6 +200,7 @@ proc handleNormalMode*(state: var EditorState, key: InputKey) =
         ))
         state.buffer.undo.commitGroup()
         state.buffer.insertLine(lineNum, text)
+        insertSemanticLine(lineNum)
         state.cursor = Position(line: lineNum, col: 0)
 
   of akUndo:
