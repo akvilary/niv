@@ -91,6 +91,9 @@ proc handleNormalMode*(state: var EditorState, key: InputKey) =
     state.cursor = moveToTop()
   of akMoveToBottom:
     state.cursor = moveToBottom(state.buffer)
+  of akGotoLine:
+    let targetLine = max(0, min(ir.count - 1, state.buffer.lineCount - 1))
+    state.cursor = Position(line: targetLine, col: 0)
   of akPageUp:
     for _ in 0..<state.viewport.height:
       state.cursor = moveUp(state.buffer, state.cursor)

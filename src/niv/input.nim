@@ -19,17 +19,33 @@ type
     akPageUp, akPageDown
     akGotoDefinition
     akGoBack
+    akGotoLine
 
   InputResult* = object
     complete*: bool
     action*: ActionKind
+    count*: int
 
 const validPrefixes = ["g", "d", "y"]
 
+proc allDigits(s: string): bool =
+  for c in s:
+    if c notin {'0'..'9'}: return false
+  return s.len > 0
+
 proc isValidPrefix(s: string): bool =
+  # Pure letter prefixes
   for p in validPrefixes:
     if p.startsWith(s) or s == p:
       return true
+  # Numeric prefix: "123", "123g" (waiting for gg or G)
+  if s.len >= 1:
+    var i = 0
+    while i < s.len and s[i] in {'0'..'9'}: inc i
+    if i > 0 and i == s.len:
+      return true  # just digits, waiting for action
+    if i > 0 and i == s.len - 1 and s[i] == 'g':
+      return true  # digits + "g", waiting for second g
   return false
 
 proc processNormalKey*(pending: var string, key: InputKey): InputResult =
@@ -103,6 +119,19 @@ proc processNormalKey*(pending: var string, key: InputKey): InputResult =
   of "u": pending = ""; return InputResult(complete: true, action: akUndo)
   of ":": pending = ""; return InputResult(complete: true, action: akEnterCommand)
   else:
+    # Check for <number>gg or <number>G
+    if pending.len >= 2 and pending.endsWith("gg"):
+      let numStr = pending[0..^3]
+      if numStr.allDigits:
+        let line = try: parseInt(numStr) except ValueError: 0
+        pending = ""
+        return InputResult(complete: true, action: akGotoLine, count: line)
+    if pending.len >= 2 and pending[^1] == 'G':
+      let numStr = pending[0..^2]
+      if numStr.allDigits:
+        let line = try: parseInt(numStr) except ValueError: 0
+        pending = ""
+        return InputResult(complete: true, action: akGotoLine, count: line)
     if not isValidPrefix(pending):
       pending = ""
       return InputResult(complete: false, action: akNone)
