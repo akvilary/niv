@@ -65,10 +65,7 @@ proc updateGitDiffStat(state: var EditorState) =
             deleted += parseInt(parts[1])
           except ValueError:
             discard
-      if added > 0 or deleted > 0:
-        state.gitDiffStat = "+" & $added & " -" & $deleted
-      else:
-        state.gitDiffStat = ""
+      state.gitDiffStat = "+" & $added & " -" & $deleted
     else:
       state.gitDiffStat = ""
   except OSError:
