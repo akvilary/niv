@@ -180,8 +180,10 @@ proc handleLspEvents(state: var EditorState): bool =
           state.statusMessage = "LSP: invalid definition response"
       of "textDocument/semanticTokens/range":
         # Direct parse: find "data":[ and extract numbers without JSON overhead
+        let isBgResponse = event.requestId == bgHighlightRequestId
         let dataKey = "\"data\":["
         let dataIdx = event.responseJson.find(dataKey)
+        var maxLine = 0
         if dataIdx >= 0:
           if semanticLines.len < state.buffer.lineCount:
             semanticLines.setLen(state.buffer.lineCount)
@@ -210,15 +212,22 @@ proc handleLspEvents(state: var EditorState): bool =
             else:
               currentCol += vals[1]
             if currentLine < semanticLines.len:
+              # Skip viewport responses for lines already covered by background
+              if not isBgResponse and currentLine < bgHighlightReceivedUpTo:
+                continue
               if currentLine != lastClearedLine:
                 semanticLines[currentLine] = @[]
                 lastClearedLine = currentLine
+              if currentLine > maxLine:
+                maxLine = currentLine
               semanticLines[currentLine].add(SemanticToken(
                 col: currentCol,
                 length: vals[2],
                 tokenType: vals[3],
               ))
-        if event.requestId == bgHighlightRequestId:
+        if isBgResponse:
+          if maxLine + 1 > bgHighlightReceivedUpTo:
+            bgHighlightReceivedUpTo = maxLine + 1
           bgHighlightRequestId = -1
         trySendBgHighlight()
       of "textDocument/completion":

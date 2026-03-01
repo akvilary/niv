@@ -37,6 +37,7 @@ const BgHighlightChunkSize* = 50_000
 var bgHighlightNextLine*: int = -1
 var bgHighlightTotalLines*: int = 0
 var bgHighlightRequestId*: int = -1
+var bgHighlightReceivedUpTo*: int = 0
 
 # ---------------------------------------------------------------------------
 # POSIX I/O helpers for worker thread (no GC-managed Stream objects)
@@ -317,6 +318,7 @@ proc resetBgHighlight*() =
   bgHighlightNextLine = -1
   bgHighlightTotalLines = 0
   bgHighlightRequestId = -1
+  bgHighlightReceivedUpTo = 0
 
 proc trySendBgHighlight*() =
   ## Send the next background highlight chunk if conditions are met
