@@ -51,7 +51,7 @@ Status legend: **[niv]** = implemented, **[niv: other]** = key used for differen
 |-----|-------------|-----|
 | `Ctrl+e` | Scroll screen down one line | |
 | `Ctrl+y` | Scroll screen up one line | |
-| `Ctrl+b` | Scroll up one page | **[niv: other]** toggle file explorer |
+| `Ctrl+b` | Scroll up one page | |
 | `Ctrl+f` | Scroll down one page | |
 | `Ctrl+d` | Scroll down half page | |
 | `Ctrl+u` | Scroll up half page | |
@@ -312,7 +312,7 @@ Status legend: **[niv]** = implemented, **[niv: other]** = key used for differen
 | `Ctrl+f` | Page down | |
 | `Ctrl+d` | Half page down | |
 | `Ctrl+u` | Half page up | |
-| `Ctrl+e` | Scroll down one line | |
+| `Ctrl+e` | Scroll down one line | **[niv: other]** toggle file explorer |
 | `Ctrl+y` | Scroll up one line | |
 | `Ctrl+g` | Show file info | **[niv: other]** toggle git panel |
 | `Ctrl+o` | Jump to older position | |
@@ -329,7 +329,7 @@ Status legend: **[niv]** = implemented, **[niv: other]** = key used for differen
 
 | Key | Mode | Description |
 |-----|------|-------------|
-| `Ctrl+B` | Normal | Toggle file explorer sidebar |
+| `Ctrl+E` | Normal | Toggle file explorer sidebar |
 | `Ctrl+G` | Normal | Toggle git panel |
 | `Ctrl+W` / `Tab` | Normal | Switch focus to sidebar |
 | `Ctrl+Space` | Insert | Trigger LSP completion |

@@ -35,7 +35,7 @@ proc handleNormalMode*(state: var EditorState, key: InputKey) =
   # Sidebar keybindings (checked before input sequence parser)
   if key.kind == kkCtrlKey:
     case key.ctrl
-    of 'b':
+    of 'e':
       toggleSidebar(state.sidebar)
       if state.sidebar.visible:
         state.sidebar.focused = true

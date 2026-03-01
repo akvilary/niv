@@ -79,7 +79,7 @@ proc handleExploreMode*(state: var EditorState, key: InputKey) =
     of 'w':
       state.sidebar.focused = false
       state.mode = mNormal
-    of 'b':
+    of 'e':
       toggleSidebar(state.sidebar)
       if not state.sidebar.visible:
         state.sidebar.focused = false
