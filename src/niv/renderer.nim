@@ -25,6 +25,9 @@ const
   colYellow   = 0xe0af68
   colCyan     = 0x7dcfff
   colSearchBg = 0x3d4f7a
+  colPurple   = 0x9d7cd8
+  colBlue     = 0x7aa2f7
+  colComment  = 0x565f89
 
 proc renderSidebar(state: EditorState, editorRows: int) =
   let sb = state.sidebar
@@ -60,11 +63,19 @@ proc renderSidebar(state: EditorState, editorRows: int) =
       if idx == sb.cursorIndex and sb.focused:
         setColorBg(colCursorLn)
 
+      if node.kind == fnkDirectory:
+        setColorFg(colPurple)
+      elif node.name.contains('.'):
+        setColorFg(colBlue)
+      else:
+        setColorFg(colComment)
+
       let truncated = if label.len > w: label[0..<w] else: label
       stdout.write(truncated)
       if truncated.len < w:
         stdout.write(spaces(w - truncated.len))
 
+      setThemeFg()
       if idx == sb.cursorIndex and sb.focused:
         setThemeColors()
     else:
