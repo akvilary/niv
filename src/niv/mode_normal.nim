@@ -118,27 +118,41 @@ proc handleNormalMode*(state: var EditorState, key: InputKey) =
     state.mode = mInsert
   of akInsertLineBelow:
     let lineNum = state.cursor.line
+    # Auto-indent: use next line's indent only if it's deeper than current
+    let curIndent = state.buffer.getIndent(lineNum)
+    let nextLine = lineNum + 1
+    var indent = curIndent
+    if nextLine < state.buffer.lineCount and state.buffer.lineLen(nextLine) > 0:
+      let nextIndent = state.buffer.getIndent(nextLine)
+      if nextIndent.len > curIndent.len:
+        indent = nextIndent
     state.buffer.undo.pushUndo(UndoEntry(
       op: uoInsertLine,
       pos: Position(line: lineNum + 1, col: 0),
-      text: "",
+      text: indent,
     ))
     state.buffer.undo.commitGroup()
-    state.buffer.insertLine(lineNum + 1, "")
+    state.buffer.insertLine(lineNum + 1, indent)
     insertSemanticLine(lineNum + 1)
-    state.cursor = Position(line: lineNum + 1, col: 0)
+    state.cursor = Position(line: lineNum + 1, col: indent.len)
     state.mode = mInsert
   of akInsertLineAbove:
     let lineNum = state.cursor.line
+    # Auto-indent: try next line (current before shift), then line above
+    var indent = ""
+    if state.buffer.lineLen(lineNum) > 0:
+      indent = state.buffer.getIndent(lineNum)
+    elif lineNum > 0 and state.buffer.lineLen(lineNum - 1) > 0:
+      indent = state.buffer.getIndent(lineNum - 1)
     state.buffer.undo.pushUndo(UndoEntry(
       op: uoInsertLine,
       pos: Position(line: lineNum, col: 0),
-      text: "",
+      text: indent,
     ))
     state.buffer.undo.commitGroup()
-    state.buffer.insertLine(lineNum, "")
+    state.buffer.insertLine(lineNum, indent)
     insertSemanticLine(lineNum)
-    state.cursor = Position(line: lineNum, col: 0)
+    state.cursor = Position(line: lineNum, col: indent.len)
     state.mode = mInsert
 
   # Editing

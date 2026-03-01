@@ -89,6 +89,7 @@ proc handleInsertMode*(state: var EditorState, key: InputKey) =
       acceptCompletion(state)
     else:
       let splitCol = state.cursor.col
+      let indent = state.buffer.getIndent(state.cursor.line)
       state.buffer.undo.pushUndo(UndoEntry(
         op: uoSplitLine,
         pos: state.cursor,
@@ -98,6 +99,11 @@ proc handleInsertMode*(state: var EditorState, key: InputKey) =
       state.cursor.col = 0
       # Split semantic tokens at the split point
       splitSemanticLine(state.cursor.line - 1, splitCol)
+      # Auto-indent: prepend indentation to the new line
+      if indent.len > 0:
+        let newLine = indent & state.buffer.getLine(state.cursor.line)
+        state.buffer.lines[state.cursor.line] = newLine
+        state.cursor.col = indent.len
       sendEditUpdate(state, state.cursor.line - 1, state.cursor.line)
 
   of kkBackspace:

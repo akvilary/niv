@@ -28,6 +28,15 @@ proc newBuffer*(filePath: string = ""): Buffer =
   if not done:
     startFileLoader(filePath, bytesRead, carry)
 
+proc getIndent*(buf: Buffer, lineNum: int): string =
+  if lineNum >= 0 and lineNum < buf.lines.len:
+    let line = buf.lines[lineNum]
+    for i, c in line:
+      if c != ' ' and c != '\t':
+        return line[0..<i]
+    return line
+  return ""
+
 proc lineCount*(buf: Buffer): int =
   buf.lines.len
 
