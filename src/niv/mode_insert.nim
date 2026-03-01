@@ -162,8 +162,8 @@ proc handleInsertMode*(state: var EditorState, key: InputKey) =
     if completionState.active:
       acceptCompletion(state)
     else:
-      # Insert 2 spaces for tab
-      for _ in 0..1:
+      let tabSize = if activeLspLanguageId == "python": 4 else: 2
+      for _ in 0..<tabSize:
         state.buffer.undo.pushUndo(UndoEntry(
           op: uoInsertChar,
           pos: state.cursor,
@@ -171,8 +171,7 @@ proc handleInsertMode*(state: var EditorState, key: InputKey) =
         ))
         state.buffer.insertChar(state.cursor, ' ')
         state.cursor.col += 1
-      # Shift tokens right by 2 from tab insertion point
-      shiftTokensRight(state.cursor.line, state.cursor.col - 2, 2)
+      shiftTokensRight(state.cursor.line, state.cursor.col - tabSize, tabSize)
       sendEditUpdate(state, state.cursor.line, state.cursor.line)
 
   of kkArrowUp:
