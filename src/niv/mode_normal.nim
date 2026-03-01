@@ -14,9 +14,15 @@ import highlight
 import fileio
 import jumplist
 import git
+import mode_git
 
 proc handleNormalMode*(state: var EditorState, key: InputKey) =
   state.statusMessage = ""
+
+  # In commit input mode, Escape from normal mode cancels the commit
+  if state.gitPanel.inCommitInput and key.kind == kkEscape:
+    cancelCommitInput(state)
+    return
 
   # Sidebar keybindings (checked before input sequence parser)
   if key.kind == kkCtrlKey:

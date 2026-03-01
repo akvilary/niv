@@ -2,7 +2,59 @@
 
 import std/strutils
 import types
+import buffer
 import git
+
+proc enterCommitInput*(state: var EditorState) =
+  ## Save current buffer/cursor, create empty buffer for commit message
+  var hasStaged = false
+  for f in state.gitPanel.files:
+    if f.isStaged:
+      hasStaged = true
+      break
+  if not hasStaged:
+    state.statusMessage = "No staged changes to commit"
+    return
+  state.gitPanel.savedBuffer = state.buffer
+  state.gitPanel.savedCursor = state.cursor
+  state.gitPanel.savedTopLine = state.viewport.topLine
+  state.gitPanel.inCommitInput = true
+  state.buffer = newBuffer("")
+  state.buffer.lines = @[""]
+  state.cursor = Position(line: 0, col: 0)
+  state.viewport.topLine = 0
+  state.viewport.leftCol = 0
+  state.mode = mInsert
+
+proc cancelCommitInput*(state: var EditorState) =
+  ## Restore original buffer, cancel commit
+  state.buffer = state.gitPanel.savedBuffer
+  state.cursor = state.gitPanel.savedCursor
+  state.viewport.topLine = state.gitPanel.savedTopLine
+  state.viewport.leftCol = 0
+  state.gitPanel.inCommitInput = false
+  state.mode = mGit
+
+proc executeCommitInput*(state: var EditorState) =
+  ## Execute commit with buffer contents, restore original buffer
+  let message = state.buffer.lines.join("\n").strip()
+  if message.len == 0:
+    state.statusMessage = "Empty commit message"
+    return
+  let (ok, msg) = gitCommit(message)
+  # Restore original buffer
+  state.buffer = state.gitPanel.savedBuffer
+  state.cursor = state.gitPanel.savedCursor
+  state.viewport.topLine = state.gitPanel.savedTopLine
+  state.viewport.leftCol = 0
+  state.gitPanel.inCommitInput = false
+  state.mode = mGit
+  if ok:
+    state.statusMessage = "Committed"
+    refreshGitFiles(state.gitPanel)
+    state.gitDiffStat = "+0 -0"
+  else:
+    state.statusMessage = "Commit failed: " & msg
 
 proc handleFilesView(state: var EditorState, key: InputKey) =
   state.statusMessage = ""
@@ -39,16 +91,7 @@ proc handleFilesView(state: var EditorState, key: InputKey) =
           state.gitPanel.confirmDiscard = true
           state.statusMessage = "Discard changes to " & f.path & "? (y/n)"
     of 'c':
-      var hasStaged = false
-      for f in state.gitPanel.files:
-        if f.isStaged:
-          hasStaged = true
-          break
-      if hasStaged:
-        state.gitPanel.inCommitInput = true
-        state.gitPanel.commitMessage = ""
-      else:
-        state.statusMessage = "No staged changes to commit"
+      enterCommitInput(state)
     of 'l':
       state.gitPanel.logEntries = gitLog()
       state.gitPanel.logCursorIndex = 0
@@ -143,35 +186,6 @@ proc handleLogView(state: var EditorState, key: InputKey) =
     discard
 
 proc handleGitMode*(state: var EditorState, key: InputKey) =
-  # Commit input mode
-  if state.gitPanel.inCommitInput:
-    case key.kind
-    of kkEscape:
-      state.gitPanel.inCommitInput = false
-      state.gitPanel.commitMessage = ""
-      state.statusMessage = ""
-    of kkEnter:
-      if state.gitPanel.commitMessage.len > 0:
-        let (ok, msg) = gitCommit(state.gitPanel.commitMessage)
-        if ok:
-          state.statusMessage = "Committed: " & state.gitPanel.commitMessage
-          refreshGitFiles(state.gitPanel)
-          state.gitDiffStat = ""
-        else:
-          state.statusMessage = "Commit failed: " & msg
-      else:
-        state.statusMessage = "Empty commit message"
-      state.gitPanel.inCommitInput = false
-      state.gitPanel.commitMessage = ""
-    of kkBackspace:
-      if state.gitPanel.commitMessage.len > 0:
-        state.gitPanel.commitMessage.setLen(state.gitPanel.commitMessage.len - 1)
-    of kkChar:
-      state.gitPanel.commitMessage.add(key.ch)
-    else:
-      discard
-    return
-
   # Confirm discard mode
   if state.gitPanel.confirmDiscard:
     case key.kind

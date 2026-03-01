@@ -104,7 +104,6 @@ proc openGitPanel*(panel: var GitPanelState) =
   panel.logEntries = @[]
   panel.logCursorIndex = 0
   panel.logScrollOffset = 0
-  panel.commitMessage = ""
   panel.inCommitInput = false
   panel.confirmDiscard = false
   panel.files = gitGetStatus()

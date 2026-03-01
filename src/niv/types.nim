@@ -124,8 +124,10 @@ type
     logEntries*: seq[GitLogEntry]
     logCursorIndex*: int
     logScrollOffset*: int
-    commitMessage*: string
     inCommitInput*: bool
+    savedBuffer*: Buffer
+    savedCursor*: Position
+    savedTopLine*: int
     confirmDiscard*: bool
 
   EditorState* = object

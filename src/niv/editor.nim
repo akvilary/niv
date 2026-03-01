@@ -323,10 +323,14 @@ proc run*(state: var EditorState) =
     # Reduce editor height when git panel is visible
     if state.gitPanel.visible:
       state.gitPanel.height = max(5, (size.height - 2) div 2)
-      state.viewport.height = size.height - 2 - state.gitPanel.height - 1  # -1 for separator
+      if state.gitPanel.inCommitInput:
+        # In commit mode, viewport maps to the panel area
+        state.viewport.height = state.gitPanel.height - 1  # -1 for help line
+      else:
+        state.viewport.height = size.height - 2 - state.gitPanel.height - 1  # -1 for separator
 
     # Reduce editor width when sidebar is visible
-    if state.sidebar.visible:
+    if state.sidebar.visible and not state.gitPanel.inCommitInput:
       state.viewport.width = size.width - state.sidebar.width - 1
 
     # Adjust viewport to keep cursor visible
@@ -385,8 +389,11 @@ proc run*(state: var EditorState) =
       state.viewport.width = sz.width
       if state.gitPanel.visible:
         state.gitPanel.height = max(5, (sz.height - 2) div 2)
-        state.viewport.height = sz.height - 2 - state.gitPanel.height - 1
-      if state.sidebar.visible:
+        if state.gitPanel.inCommitInput:
+          state.viewport.height = state.gitPanel.height - 1
+        else:
+          state.viewport.height = sz.height - 2 - state.gitPanel.height - 1
+      if state.sidebar.visible and not state.gitPanel.inCommitInput:
         state.viewport.width = sz.width - state.sidebar.width - 1
 
       # Render input result immediately — cursor visible before file events

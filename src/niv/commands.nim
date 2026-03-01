@@ -10,6 +10,7 @@ import lsp_client
 import lsp_types
 import highlight
 import git
+import mode_git
 
 type
   ExCommand* = enum
@@ -72,6 +73,19 @@ proc updateGitDiffStat(state: var EditorState) =
     state.gitDiffStat = ""
 
 proc executeCommand*(state: var EditorState, cmd: ExCommand, arg: string) =
+  # Intercept commands in commit input mode
+  if state.gitPanel.inCommitInput:
+    case cmd
+    of ecWriteQuit, ecWrite:
+      executeCommitInput(state)
+    of ecQuit:
+      cancelCommitInput(state)
+    of ecForceQuit:
+      cancelCommitInput(state)
+    else:
+      state.statusMessage = "Finish or cancel commit first (:wq to commit, :q to cancel)"
+    return
+
   case cmd
   of ecWrite:
     let path = if arg.len > 0: arg else: state.buffer.filePath

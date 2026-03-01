@@ -159,9 +159,67 @@ proc renderLspManagerModal(totalWidth, height: int) =
         let statusLine = " " & mgr.statusMessage
         renderModalRow(startCol, innerWidth, statusLine)
 
+proc renderGitCommitEditor(state: EditorState, startRow, panelHeight, totalWidth: int) =
+  ## Render commit message editor in the git panel area
+  let lnWidth = lineNumberWidth(state.buffer.lineCount)
+  let textWidth = totalWidth - lnWidth
+  let contentRows = panelHeight - 1  # -1 for help line
+
+  # Separator with title
+  moveCursor(startRow, 1)
+  setColorFg(colGutter)
+  let title = " Commit Message "
+  let leftBorder = max(1, (totalWidth - title.len) div 2)
+  let rightBorder = max(0, totalWidth - leftBorder - title.len)
+  stdout.write("\xe2\x94\x80".repeat(leftBorder))  # ─
+  setColorFg(colCyan)
+  stdout.write(title)
+  setColorFg(colGutter)
+  stdout.write("\xe2\x94\x80".repeat(rightBorder))  # ─
+  setThemeFg()
+
+  # Render buffer lines
+  for row in 0..<contentRows:
+    moveCursor(startRow + 1 + row, 1)
+    setThemeColors()
+    clearLine()
+
+    let lineNum = state.viewport.topLine + row
+    if lineNum < state.buffer.lineCount:
+      let numStr = $(lineNum + 1)
+      let padding = lnWidth - numStr.len - 1
+      setColorFg(colGutter)
+      stdout.write(spaces(padding) & numStr & " ")
+      setThemeFg()
+
+      let line = state.buffer.lines[lineNum]
+      let startCol = state.viewport.leftCol
+      if startCol < line.len:
+        let endCol = min(startCol + textWidth, line.len)
+        stdout.write(line[startCol..<endCol])
+    else:
+      setColorFg(colGutter)
+      stdout.write("~")
+      setThemeFg()
+
+  # Help line
+  moveCursor(startRow + 1 + contentRows, 1)
+  setThemeColors()
+  clearLine()
+  let modeHint = if state.mode == mInsert: "INSERT" else: "NORMAL"
+  let helpLine = " " & modeHint & "  :wq commit  :q cancel"
+  setColorFg(colGutter)
+  let truncHelp = if helpLine.len > totalWidth: helpLine[0..<totalWidth] else: helpLine
+  stdout.write(truncHelp)
+  setThemeFg()
+
 proc renderGitPanel(state: EditorState, startRow, panelHeight, totalWidth: int) =
   let gp = state.gitPanel
   let contentWidth = totalWidth
+
+  if gp.inCommitInput:
+    renderGitCommitEditor(state, startRow, panelHeight, totalWidth)
+    return
 
   # Separator line
   moveCursor(startRow, 1)
@@ -371,43 +429,50 @@ proc render*(state: EditorState) =
   let colOffset = if sidebarVisible: state.sidebar.width + 1 else: 0
   let editorWidth = totalWidth - colOffset
 
-  let lnWidth = lineNumberWidth(state.buffer.lineCount)
-  let textWidth = editorWidth - lnWidth
-  let useLspHighlight = semanticLines.len > 0
-
   # Calculate git panel height
   let gitPanelVisible = state.gitPanel.visible
   let panelHeight = if gitPanelVisible: state.gitPanel.height else: 0
   let editorRows = height - 2 - (if gitPanelVisible: panelHeight + 1 else: 0)  # +1 for separator
+  let inCommit = state.gitPanel.inCommitInput
+
+  # Choose which buffer to render in the editor area
+  let renderBuffer = if inCommit: state.gitPanel.savedBuffer else: state.buffer
+  let renderTopLine = if inCommit: state.gitPanel.savedTopLine else: state.viewport.topLine
+  let renderLeftCol = if inCommit: 0 else: state.viewport.leftCol
+
+  let lnWidth = lineNumberWidth(renderBuffer.lineCount)
+  let textWidth = editorWidth - lnWidth
+  let useLspHighlight = semanticLines.len > 0 and not inCommit
 
   hideCursor()
   setThemeColors()
 
   # Draw sidebar
-  if sidebarVisible:
+  if sidebarVisible and not inCommit:
     renderSidebar(state, editorRows)
     setThemeColors()
 
-  # Draw editor buffer
+  # Draw editor buffer (frozen when in commit mode)
   for row in 0..<editorRows:
     moveCursor(row + 1, colOffset + 1)
     clearLine()
 
-    let lineNum = state.viewport.topLine + row
+    let lineNum = renderTopLine + row
 
-    if lineNum < state.buffer.lineCount:
+    if lineNum < renderBuffer.lineCount:
       let numStr = $(lineNum + 1)
       let padding = lnWidth - numStr.len - 1
 
       # Color line number by diagnostic severity
       var diagSev = 0  # 0=none, 1=error, 2=warning
-      for d in currentDiagnostics:
-        if d.range.startLine == lineNum:
-          if d.severity == dsError:
-            diagSev = 1
-            break
-          elif d.severity == dsWarning and diagSev == 0:
-            diagSev = 2
+      if not inCommit:
+        for d in currentDiagnostics:
+          if d.range.startLine == lineNum:
+            if d.severity == dsError:
+              diagSev = 1
+              break
+            elif d.severity == dsWarning and diagSev == 0:
+              diagSev = 2
 
       if diagSev == 1:
         setColorFg(colError)
@@ -418,8 +483,8 @@ proc render*(state: EditorState) =
       stdout.write(spaces(padding) & numStr & " ")
       setThemeFg()
 
-      let line = state.buffer.lines[lineNum]
-      let startCol = state.viewport.leftCol
+      let line = renderBuffer.lines[lineNum]
+      let startCol = renderLeftCol
       if startCol < line.len:
         let endCol = min(startCol + textWidth, line.len)
         if useLspHighlight and lineNum < semanticLines.len and semanticLines[lineNum].len > 0:
@@ -512,9 +577,7 @@ proc render*(state: EditorState) =
   moveCursor(height, 1)
   setThemeColors()
   clearLine()
-  if state.mode == mGit and state.gitPanel.inCommitInput:
-    stdout.write("Commit: " & state.gitPanel.commitMessage)
-  elif state.mode == mCommand:
+  if state.mode == mCommand:
     stdout.write(":" & state.commandLine)
   elif state.statusMessage.len > 0:
     stdout.write(state.statusMessage)
@@ -563,8 +626,20 @@ proc render*(state: EditorState) =
         setThemeColors()
 
   # Position cursor
-  if state.mode == mExplore or state.mode == mGit:
+  if state.mode == mExplore or (state.mode == mGit and not inCommit):
     hideCursor()
+  elif inCommit and state.mode != mCommand:
+    # Place cursor in the git panel commit editor area
+    let commitLnWidth = lineNumberWidth(state.buffer.lineCount)
+    let panelStartRow = editorRows + 1  # separator row
+    let screenRow = panelStartRow + 1 + (state.cursor.line - state.viewport.topLine)
+    let screenCol = state.cursor.col - state.viewport.leftCol + commitLnWidth + 1
+    moveCursor(screenRow, screenCol)
+    showCursor()
+  elif state.mode == mCommand:
+    # Command line cursor
+    moveCursor(height, 1 + state.commandLine.len + 1)
+    showCursor()
   else:
     let screenRow = state.cursor.line - state.viewport.topLine + 1
     let screenCol = state.cursor.col - state.viewport.leftCol + lnWidth + colOffset + 1
