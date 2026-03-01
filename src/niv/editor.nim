@@ -12,6 +12,7 @@ import mode_insert
 import mode_command
 import mode_explore
 import mode_lsp_manager
+import mode_git
 import lsp_manager
 import lsp_client
 import lsp_types
@@ -322,6 +323,11 @@ proc run*(state: var EditorState) =
     state.viewport.height = size.height - 2  # status + command lines
     state.viewport.width = size.width
 
+    # Reduce editor height when git panel is visible
+    if state.gitPanel.visible:
+      state.gitPanel.height = max(5, (size.height - 2) div 2)
+      state.viewport.height = size.height - 2 - state.gitPanel.height - 1  # -1 for separator
+
     # Reduce editor width when sidebar is visible
     if state.sidebar.visible:
       state.viewport.width = size.width - state.sidebar.width - 1
@@ -365,6 +371,8 @@ proc run*(state: var EditorState) =
         handleExploreMode(state, key)
       of mLspManager:
         handleLspManagerMode(state, key)
+      of mGit:
+        handleGitMode(state, key)
 
       # Pause/resume file loader on insert mode transitions
       if state.mode != prevMode:

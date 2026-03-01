@@ -30,6 +30,7 @@ type
     mCommand
     mExplore
     mLspManager
+    mGit
 
   Position* = object
     line*: int      # 0-indexed
@@ -97,6 +98,36 @@ type
     cursorIndex*: int
     scrollOffset*: int
 
+  GitFileStatus* = object
+    path*: string
+    indexStatus*: char
+    workTreeStatus*: char
+
+  GitLogEntry* = object
+    hash*: string
+    message*: string
+
+  GitPanelView* = enum
+    gvFiles
+    gvDiff
+    gvLog
+
+  GitPanelState* = object
+    visible*: bool
+    height*: int
+    view*: GitPanelView
+    files*: seq[GitFileStatus]
+    cursorIndex*: int
+    scrollOffset*: int
+    diffLines*: seq[string]
+    diffScrollOffset*: int
+    logEntries*: seq[GitLogEntry]
+    logCursorIndex*: int
+    logScrollOffset*: int
+    commitMessage*: string
+    inCommitInput*: bool
+    confirmDiscard*: bool
+
   EditorState* = object
     buffer*: Buffer
     cursor*: Position
@@ -111,6 +142,7 @@ type
     sidebar*: SidebarState
     gitBranch*: string
     gitDiffStat*: string
+    gitPanel*: GitPanelState
 
 proc noKey*(): InputKey =
   InputKey(kind: kkNone)

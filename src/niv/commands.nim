@@ -9,6 +9,7 @@ import lsp_manager
 import lsp_client
 import lsp_types
 import highlight
+import git
 
 type
   ExCommand* = enum
@@ -19,6 +20,7 @@ type
     ecEdit
     ecNvimTree
     ecLsp
+    ecGit
     ecUnknown
 
 proc parseCommand*(input: string): (ExCommand, string) =
@@ -41,6 +43,8 @@ proc parseCommand*(input: string): (ExCommand, string) =
     return (ecNvimTree, "")
   elif trimmed == "lsp":
     return (ecLsp, "")
+  elif trimmed == "git":
+    return (ecGit, "")
   else:
     return (ecUnknown, trimmed)
 
@@ -149,6 +153,14 @@ proc executeCommand*(state: var EditorState, cmd: ExCommand, arg: string) =
   of ecLsp:
     openLspManager()
     state.mode = mLspManager
+
+  of ecGit:
+    if state.gitPanel.visible:
+      closeGitPanel(state.gitPanel)
+      state.mode = mNormal
+    else:
+      openGitPanel(state.gitPanel)
+      state.mode = mGit
 
   of ecUnknown:
     state.statusMessage = "Not an editor command: " & arg

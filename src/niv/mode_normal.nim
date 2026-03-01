@@ -13,6 +13,7 @@ import lsp_protocol
 import highlight
 import fileio
 import jumplist
+import git
 
 proc handleNormalMode*(state: var EditorState, key: InputKey) =
   state.statusMessage = ""
@@ -31,6 +32,14 @@ proc handleNormalMode*(state: var EditorState, key: InputKey) =
         state.sidebar.focused = true
         state.mode = mExplore
         return
+    of 'g':
+      if state.gitPanel.visible:
+        closeGitPanel(state.gitPanel)
+        state.mode = mNormal
+      else:
+        openGitPanel(state.gitPanel)
+        state.mode = mGit
+      return
     else:
       discard
 

@@ -9,6 +9,7 @@ import lsp_manager
 import lsp_client
 import lsp_types
 import highlight
+import git
 
 # Tokyo Night Storm palette
 const
@@ -19,11 +20,15 @@ const
   colCursorLn = 0x292e42
   colError    = 0xdb4b4b
   colWarning  = 0xe0af68
+  colGreen    = 0x9ece6a
+  colRed      = 0xf7768e
+  colYellow   = 0xe0af68
+  colCyan     = 0x7dcfff
 
-proc renderSidebar(state: EditorState, height: int) =
+proc renderSidebar(state: EditorState, editorRows: int) =
   let sb = state.sidebar
   let w = sb.width
-  let visibleRows = height - 2
+  let visibleRows = editorRows
 
   # Header
   moveCursor(1, 1)
@@ -154,6 +159,209 @@ proc renderLspManagerModal(totalWidth, height: int) =
         let statusLine = " " & mgr.statusMessage
         renderModalRow(startCol, innerWidth, statusLine)
 
+proc renderGitPanel(state: EditorState, startRow, panelHeight, totalWidth: int) =
+  let gp = state.gitPanel
+  let contentWidth = totalWidth
+
+  # Separator line
+  moveCursor(startRow, 1)
+  setColorFg(colGutter)
+  stdout.write("\xe2\x94\x80".repeat(contentWidth))  # ─
+  setThemeFg()
+
+  case gp.view
+  of gvFiles:
+    # Build display list: Staged section, then Changes section
+    var displayLines: seq[tuple[text: string, isHeader: bool, fileIdx: int]] = @[]
+
+    # Count staged and unstaged
+    var stagedFiles: seq[int] = @[]
+    var unstagedFiles: seq[int] = @[]
+    for i, f in gp.files:
+      if f.isStaged:
+        stagedFiles.add(i)
+      else:
+        unstagedFiles.add(i)
+
+    if stagedFiles.len > 0:
+      displayLines.add((" Staged (" & $stagedFiles.len & "):", true, -1))
+      for idx in stagedFiles:
+        let f = gp.files[idx]
+        displayLines.add(("   " & f.statusChar & "  " & f.path, false, idx))
+
+    if unstagedFiles.len > 0:
+      displayLines.add((" Changes (" & $unstagedFiles.len & "):", true, -1))
+      for idx in unstagedFiles:
+        let f = gp.files[idx]
+        displayLines.add(("   " & f.statusChar & "  " & f.path, false, idx))
+
+    if displayLines.len == 0:
+      displayLines.add((" No changes", true, -1))
+
+    # Help line
+    let helpLine = " s:stage/unstage  d:discard  c:commit  l:log  Enter:diff  r:refresh  q:close"
+
+    # Adjust scroll to keep cursor visible
+    # Map cursorIndex to display line index
+    var cursorDisplayIdx = -1
+    for i, dl in displayLines:
+      if dl.fileIdx == gp.cursorIndex:
+        cursorDisplayIdx = i
+        break
+
+    let contentRows = panelHeight - 2  # minus separator and help line
+    var scrollOff = gp.scrollOffset
+    if cursorDisplayIdx >= 0:
+      if cursorDisplayIdx < scrollOff:
+        scrollOff = cursorDisplayIdx
+      elif cursorDisplayIdx >= scrollOff + contentRows:
+        scrollOff = cursorDisplayIdx - contentRows + 1
+
+    for row in 0..<panelHeight - 1:
+      moveCursor(startRow + 1 + row, 1)
+      setThemeColors()
+      clearLine()
+
+      if row < contentRows:
+        let idx = scrollOff + row
+        if idx < displayLines.len:
+          let dl = displayLines[idx]
+          if dl.isHeader:
+            setColorFg(colCyan)
+            let truncated = if dl.text.len > contentWidth: dl.text[0..<contentWidth] else: dl.text
+            stdout.write(truncated)
+            setThemeFg()
+          else:
+            let isSelected = dl.fileIdx == gp.cursorIndex
+            if isSelected:
+              setColorBg(colCursorLn)
+
+            let f = gp.files[dl.fileIdx]
+            # Color the status char
+            let prefix = "   "
+            let statusCh = $f.statusChar
+            let rest = "  " & f.path
+            let fullLine = prefix & statusCh & rest
+            let truncated = if fullLine.len > contentWidth: fullLine[0..<contentWidth] else: fullLine
+
+            if f.isStaged:
+              stdout.write(prefix)
+              setColorFg(colGreen)
+              stdout.write(statusCh)
+              setThemeFg()
+              stdout.write(rest)
+            elif f.isUntracked:
+              stdout.write(prefix)
+              setColorFg(colYellow)
+              stdout.write(statusCh)
+              setThemeFg()
+              stdout.write(rest)
+            else:
+              stdout.write(prefix)
+              setColorFg(colRed)
+              stdout.write(statusCh)
+              setThemeFg()
+              stdout.write(rest)
+
+            # Pad to fill line if selected
+            if isSelected:
+              let written = truncated.len
+              if written < contentWidth:
+                stdout.write(spaces(contentWidth - written))
+              setThemeColors()
+      elif row == contentRows:
+        # Help line
+        setColorFg(colGutter)
+        let truncHelp = if helpLine.len > contentWidth: helpLine[0..<contentWidth] else: helpLine
+        stdout.write(truncHelp)
+        setThemeFg()
+
+  of gvDiff:
+    let contentRows = panelHeight - 2  # minus separator and help line
+    let helpLine = " q:back  j/k:scroll"
+
+    for row in 0..<panelHeight - 1:
+      moveCursor(startRow + 1 + row, 1)
+      setThemeColors()
+      clearLine()
+
+      if row < contentRows:
+        let lineIdx = gp.diffScrollOffset + row
+        if lineIdx < gp.diffLines.len:
+          let line = gp.diffLines[lineIdx]
+          let truncated = if line.len > contentWidth: line[0..<contentWidth] else: line
+          if line.len > 0 and line[0] == '+':
+            setColorFg(colGreen)
+            stdout.write(truncated)
+            setThemeFg()
+          elif line.len > 0 and line[0] == '-':
+            setColorFg(colRed)
+            stdout.write(truncated)
+            setThemeFg()
+          elif line.startsWith("@@"):
+            setColorFg(colCyan)
+            stdout.write(truncated)
+            setThemeFg()
+          elif line.startsWith("diff ") or line.startsWith("index ") or
+               line.startsWith("---") or line.startsWith("+++"):
+            setColorFg(colGutter)
+            stdout.write(truncated)
+            setThemeFg()
+          else:
+            stdout.write(truncated)
+      elif row == contentRows:
+        setColorFg(colGutter)
+        let truncHelp = if helpLine.len > contentWidth: helpLine[0..<contentWidth] else: helpLine
+        stdout.write(truncHelp)
+        setThemeFg()
+
+  of gvLog:
+    let contentRows = panelHeight - 2  # minus separator and help line
+    let helpLine = " q:back  j/k:scroll"
+
+    # Adjust scroll to keep cursor visible
+    var scrollOff = gp.logScrollOffset
+    if gp.logCursorIndex < scrollOff:
+      scrollOff = gp.logCursorIndex
+    elif gp.logCursorIndex >= scrollOff + contentRows:
+      scrollOff = gp.logCursorIndex - contentRows + 1
+
+    for row in 0..<panelHeight - 1:
+      moveCursor(startRow + 1 + row, 1)
+      setThemeColors()
+      clearLine()
+
+      if row == 0 and scrollOff == 0:
+        setColorFg(colCyan)
+        stdout.write(" Recent commits:")
+        setThemeFg()
+      elif row < contentRows:
+        let adjustedRow = if scrollOff == 0: row - 1 else: row
+        let idx = scrollOff + adjustedRow
+        if idx >= 0 and idx < gp.logEntries.len:
+          let entry = gp.logEntries[idx]
+          let isSelected = idx == gp.logCursorIndex
+
+          if isSelected:
+            setColorBg(colCursorLn)
+
+          stdout.write("   ")
+          setColorFg(colYellow)
+          stdout.write(entry.hash)
+          setThemeFg()
+          stdout.write(" " & entry.message)
+
+          if isSelected:
+            let written = 3 + entry.hash.len + 1 + entry.message.len
+            if written < contentWidth:
+              stdout.write(spaces(contentWidth - written))
+            setThemeColors()
+      elif row == contentRows:
+        setColorFg(colGutter)
+        let truncHelp = if helpLine.len > contentWidth: helpLine[0..<contentWidth] else: helpLine
+        stdout.write(truncHelp)
+        setThemeFg()
+
 proc render*(state: EditorState) =
   let size = getTerminalSize()
   let totalWidth = size.width
@@ -167,16 +375,21 @@ proc render*(state: EditorState) =
   let textWidth = editorWidth - lnWidth
   let useLspHighlight = semanticLines.len > 0
 
+  # Calculate git panel height
+  let gitPanelVisible = state.gitPanel.visible
+  let panelHeight = if gitPanelVisible: state.gitPanel.height else: 0
+  let editorRows = height - 2 - (if gitPanelVisible: panelHeight + 1 else: 0)  # +1 for separator
+
   hideCursor()
   setThemeColors()
 
   # Draw sidebar
   if sidebarVisible:
-    renderSidebar(state, height)
+    renderSidebar(state, editorRows)
     setThemeColors()
 
   # Draw editor buffer
-  for row in 0..<height - 2:
+  for row in 0..<editorRows:
     moveCursor(row + 1, colOffset + 1)
     clearLine()
 
@@ -238,6 +451,12 @@ proc render*(state: EditorState) =
       stdout.write("~")
       setThemeFg()
 
+  # Draw git panel
+  if gitPanelVisible:
+    let panelStartRow = editorRows + 1
+    setThemeColors()
+    renderGitPanel(state, panelStartRow, panelHeight + 1, totalWidth)
+
   # Status line
   moveCursor(height - 1, 1)
   resetAttributes()
@@ -251,6 +470,7 @@ proc render*(state: EditorState) =
     of mCommand: " COMMAND "
     of mExplore: " EXPLORE "
     of mLspManager: " LSP "
+    of mGit: " GIT "
 
   let filename = if state.buffer.filePath.len > 0:
     extractFilename(state.buffer.filePath)
@@ -292,7 +512,9 @@ proc render*(state: EditorState) =
   moveCursor(height, 1)
   setThemeColors()
   clearLine()
-  if state.mode == mCommand:
+  if state.mode == mGit and state.gitPanel.inCommitInput:
+    stdout.write("Commit: " & state.gitPanel.commitMessage)
+  elif state.mode == mCommand:
     stdout.write(":" & state.commandLine)
   elif state.statusMessage.len > 0:
     stdout.write(state.statusMessage)
@@ -341,7 +563,7 @@ proc render*(state: EditorState) =
         setThemeColors()
 
   # Position cursor
-  if state.mode == mExplore:
+  if state.mode == mExplore or state.mode == mGit:
     hideCursor()
   else:
     let screenRow = state.cursor.line - state.viewport.topLine + 1
