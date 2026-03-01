@@ -2,6 +2,7 @@
 
 import types
 import buffer
+import highlight
 
 proc pushUndo*(hist: var UndoHistory, entry: UndoEntry) =
   hist.current.entries.add(entry)
@@ -16,26 +17,25 @@ proc undoOne(entry: UndoEntry, buf: var Buffer): Position =
   result = entry.pos
   case entry.op
   of uoInsertChar:
-    # Was inserted -> delete it
     discard buf.deleteChar(entry.pos)
+    shiftTokensLeft(entry.pos.line, entry.pos.col, 1)
   of uoDeleteChar:
-    # Was deleted -> re-insert it
     buf.insertChar(entry.pos, entry.text[0])
+    shiftTokensRight(entry.pos.line, entry.pos.col, 1)
   of uoInsertLine:
-    # Was inserted -> delete it
     discard buf.deleteLine(entry.pos.line)
+    deleteSemanticLine(entry.pos.line)
   of uoDeleteLine:
-    # Was deleted -> re-insert it
     buf.insertLine(entry.pos.line, entry.text)
+    insertSemanticLine(entry.pos.line)
   of uoReplaceLine:
-    # Was replaced -> restore old text
     buf.replaceLine(entry.pos.line, entry.text)
   of uoSplitLine:
-    # Was split -> join
     buf.joinLines(entry.pos.line)
+    joinSemanticLines(entry.pos.line, entry.pos.col)
   of uoJoinLines:
-    # Was joined -> split
     buf.splitLine(entry.pos)
+    splitSemanticLine(entry.pos.line, entry.pos.col)
 
 proc undo*(hist: var UndoHistory, buf: var Buffer): Position =
   commitGroup(hist)  # commit any pending edits
@@ -52,21 +52,27 @@ proc redoOne(entry: UndoEntry, buf: var Buffer): Position =
   case entry.op
   of uoInsertChar:
     buf.insertChar(entry.pos, entry.text[0])
+    shiftTokensRight(entry.pos.line, entry.pos.col, 1)
     result.col += 1
   of uoDeleteChar:
     discard buf.deleteChar(entry.pos)
+    shiftTokensLeft(entry.pos.line, entry.pos.col, 1)
   of uoInsertLine:
     buf.insertLine(entry.pos.line, entry.text)
+    insertSemanticLine(entry.pos.line)
   of uoDeleteLine:
     discard buf.deleteLine(entry.pos.line)
+    deleteSemanticLine(entry.pos.line)
   of uoReplaceLine:
     let old = buf.getLine(entry.pos.line)
     buf.replaceLine(entry.pos.line, entry.lines[0])
     discard old
   of uoSplitLine:
     buf.splitLine(entry.pos)
+    splitSemanticLine(entry.pos.line, entry.pos.col)
   of uoJoinLines:
     buf.joinLines(entry.pos.line)
+    joinSemanticLines(entry.pos.line, entry.pos.col)
 
 proc redo*(hist: var UndoHistory, buf: var Buffer): Position =
   if hist.redoStack.len == 0:
