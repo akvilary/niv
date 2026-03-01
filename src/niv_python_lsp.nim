@@ -90,8 +90,8 @@ type
 
 const pythonKeywords = [
   "as", "assert", "async", "await", "break", "class", "continue",
-  "def", "del", "elif", "else", "except", "finally", "for", "from",
-  "global", "if", "import", "lambda", "nonlocal", "pass", "raise",
+  "case", "def", "del", "elif", "else", "except", "finally", "for", "from",
+  "global", "if", "import", "lambda", "match", "nonlocal", "pass", "raise",
   "return", "try", "while", "with", "yield",
 ]
 
