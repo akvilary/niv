@@ -63,10 +63,14 @@ proc gitUnstage*(path: string): bool =
   except OSError:
     return false
 
-proc gitDiscard*(path: string): bool =
+proc gitDiscard*(path: string, untracked: bool): bool =
   try:
-    let (_, code) = execCmdEx("git checkout -- " & quoteShell(path), options = {poUsePath})
-    return code == 0
+    if untracked:
+      let (_, code) = execCmdEx("rm -f " & quoteShell(path), options = {poUsePath})
+      return code == 0
+    else:
+      let (_, code) = execCmdEx("git checkout -- " & quoteShell(path), options = {poUsePath})
+      return code == 0
   except OSError:
     return false
 

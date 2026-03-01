@@ -193,7 +193,7 @@ proc handleGitMode*(state: var EditorState, key: InputKey) =
       if key.ch == 'y':
         if state.gitPanel.cursorIndex < state.gitPanel.files.len:
           let f = state.gitPanel.files[state.gitPanel.cursorIndex]
-          if gitDiscard(f.path):
+          if gitDiscard(f.path, f.isUntracked):
             state.statusMessage = "Discarded: " & f.path
             refreshGitFiles(state.gitPanel)
           else:
