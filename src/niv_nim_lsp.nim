@@ -488,6 +488,11 @@ proc tokenizeNim(text: string, startLine: int = 0, endLine: int = int.high): (se
             tokens.add(NimToken(kind: ntBuiltinConst, line: sLine, col: sCol, length: length))
           elif word in kwOperatorSet:
             tokens.add(NimToken(kind: ntOperator, line: sLine, col: sCol, length: length))
+          elif word in declKeywordSet:
+            tokens.add(NimToken(kind: ntKeyword, line: sLine, col: sCol, length: length))
+            lastKeyword = word
+          elif word in keywordSet:
+            tokens.add(NimToken(kind: ntKeyword, line: sLine, col: sCol, length: length))
       elif word in builtinConstSet:
         tokens.add(NimToken(kind: ntBuiltinConst, line: sLine, col: sCol, length: length))
       elif word in kwOperatorSet:
