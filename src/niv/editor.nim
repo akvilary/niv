@@ -379,6 +379,16 @@ proc run*(state: var EditorState) =
           resumeFileLoader()
         prevMode = state.mode
 
+      # Recalculate viewport dimensions (git panel may have toggled)
+      let sz = getTerminalSize()
+      state.viewport.height = sz.height - 2
+      state.viewport.width = sz.width
+      if state.gitPanel.visible:
+        state.gitPanel.height = max(5, (sz.height - 2) div 2)
+        state.viewport.height = sz.height - 2 - state.gitPanel.height - 1
+      if state.sidebar.visible:
+        state.viewport.width = sz.width - state.sidebar.width - 1
+
       # Render input result immediately — cursor visible before file events
       adjustViewport(state.viewport, state.cursor, state.buffer.lineCount)
       if state.sidebar.visible:
