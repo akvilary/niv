@@ -338,6 +338,48 @@ proc renderGitPanel(state: EditorState, startRow, panelHeight, totalWidth: int) 
     let contentRows = panelHeight - 2  # minus separator and help line
     let helpLine = " q:back  j/k:scroll"
 
+    # Pre-compute line numbers for each diff line
+    var lineNums: seq[int] = @[]  # -1 means no number
+    var oldLine, newLine = 0
+    for line in gp.diffLines:
+      if line.startsWith("@@"):
+        let plusIdx = line.find('+', 3)
+        if plusIdx > 0:
+          let commaIdx = line.find(',', plusIdx)
+          let spaceIdx = line.find(' ', plusIdx)
+          let endIdx = if commaIdx > 0 and commaIdx < spaceIdx: commaIdx
+                       elif spaceIdx > 0: spaceIdx
+                       else: line.len
+          try: newLine = parseInt(line[plusIdx + 1..<endIdx])
+          except ValueError: newLine = 0
+          let minusStart = line.find('-', 3)
+          if minusStart > 0:
+            let mComma = line.find(',', minusStart)
+            let mSpace = line.find(' ', minusStart)
+            let mEnd = if mComma > 0 and mComma < mSpace: mComma
+                        elif mSpace > 0: mSpace
+                        else: line.len
+            try: oldLine = parseInt(line[minusStart + 1..<mEnd])
+            except ValueError: oldLine = 0
+        lineNums.add(-1)
+      elif line.len > 0 and line[0] == '+' and not line.startsWith("+++"):
+        lineNums.add(newLine)
+        inc newLine
+      elif line.len > 0 and line[0] == '-' and not line.startsWith("---"):
+        lineNums.add(oldLine)
+        inc oldLine
+      elif line.startsWith("diff ") or line.startsWith("index ") or
+           line.startsWith("---") or line.startsWith("+++"):
+        lineNums.add(-1)
+      else:
+        lineNums.add(newLine)
+        inc oldLine
+        inc newLine
+
+    let lnW = 5  # width for line number column
+    let gutterW = lnW + 1  # "nnnnn│"
+    let textW = contentWidth - gutterW
+
     for row in 0..<panelHeight - 1:
       moveCursor(startRow + 1 + row, 1)
       setThemeColors()
@@ -347,12 +389,25 @@ proc renderGitPanel(state: EditorState, startRow, panelHeight, totalWidth: int) 
         let lineIdx = gp.diffScrollOffset + row
         if lineIdx < gp.diffLines.len:
           let line = gp.diffLines[lineIdx]
-          let truncated = if line.len > contentWidth: line[0..<contentWidth] else: line
-          if line.len > 0 and line[0] == '+':
+          let num = if lineIdx < lineNums.len: lineNums[lineIdx] else: -1
+
+          # Draw line number gutter
+          setColorFg(colGutter)
+          if num > 0:
+            let s = $num
+            stdout.write(spaces(lnW - s.len) & s)
+          else:
+            stdout.write(spaces(lnW))
+          stdout.write("\xe2\x94\x82")  # │
+          setThemeFg()
+
+          # Draw diff content
+          let truncated = if line.len > textW: line[0..<textW] else: line
+          if line.len > 0 and line[0] == '+' and not line.startsWith("+++"):
             setColorFg(colGreen)
             stdout.write(truncated)
             setThemeFg()
-          elif line.len > 0 and line[0] == '-':
+          elif line.len > 0 and line[0] == '-' and not line.startsWith("---"):
             setColorFg(colRed)
             stdout.write(truncated)
             setThemeFg()
