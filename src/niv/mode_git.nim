@@ -113,6 +113,7 @@ proc handleFilesView(state: var EditorState, key: InputKey) =
         gitDiff(f.path, staged = false)
       state.gitPanel.diffLines = diffText.splitLines()
       state.gitPanel.diffScrollOffset = 0
+      state.gitPanel.diffReturnView = gvFiles
       state.gitPanel.view = gvDiff
 
   of kkArrowDown:
@@ -130,12 +131,12 @@ proc handleDiffView(state: var EditorState, key: InputKey) =
 
   case key.kind
   of kkEscape:
-    state.gitPanel.view = gvFiles
+    state.gitPanel.view = state.gitPanel.diffReturnView
 
   of kkChar:
     case key.ch
     of 'q':
-      state.gitPanel.view = gvFiles
+      state.gitPanel.view = state.gitPanel.diffReturnView
     of 'j':
       if state.gitPanel.diffScrollOffset < max(0, state.gitPanel.diffLines.len - 1):
         inc state.gitPanel.diffScrollOffset
@@ -174,6 +175,15 @@ proc handleLogView(state: var EditorState, key: InputKey) =
         dec state.gitPanel.logCursorIndex
     else:
       discard
+
+  of kkEnter:
+    if state.gitPanel.logCursorIndex < state.gitPanel.logEntries.len:
+      let entry = state.gitPanel.logEntries[state.gitPanel.logCursorIndex]
+      let diffText = gitShowCommit(entry.hash)
+      state.gitPanel.diffLines = diffText.splitLines()
+      state.gitPanel.diffScrollOffset = 0
+      state.gitPanel.diffReturnView = gvLog
+      state.gitPanel.view = gvDiff
 
   of kkArrowDown:
     if state.gitPanel.logEntries.len > 0 and state.gitPanel.logCursorIndex < state.gitPanel.logEntries.len - 1:

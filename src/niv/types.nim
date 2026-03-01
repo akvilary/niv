@@ -121,6 +121,7 @@ type
     scrollOffset*: int
     diffLines*: seq[string]
     diffScrollOffset*: int
+    diffReturnView*: GitPanelView
     logEntries*: seq[GitLogEntry]
     logCursorIndex*: int
     logScrollOffset*: int

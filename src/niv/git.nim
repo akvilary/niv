@@ -98,6 +98,15 @@ proc gitLog*(count: int = 30): seq[GitLogEntry] =
   except OSError:
     return @[]
 
+proc gitShowCommit*(hash: string): string =
+  try:
+    let (output, code) = execCmdEx("git show " & quoteShell(hash), options = {poUsePath})
+    if code == 0:
+      return output
+    return ""
+  except OSError:
+    return ""
+
 proc openGitPanel*(panel: var GitPanelState) =
   panel.visible = true
   panel.view = gvFiles
