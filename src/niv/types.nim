@@ -131,6 +131,10 @@ type
     savedTopLine*: int
     confirmDiscard*: bool
 
+  SearchMatch* = object
+    line*: int
+    col*: int
+
   EditorState* = object
     buffer*: Buffer
     cursor*: Position
@@ -146,6 +150,10 @@ type
     gitBranch*: string
     gitDiffStat*: string
     gitPanel*: GitPanelState
+    searchQuery*: string
+    searchMatches*: seq[SearchMatch]
+    searchIndex*: int
+    searchInput*: bool
 
 proc noKey*(): InputKey =
   InputKey(kind: kkNone)

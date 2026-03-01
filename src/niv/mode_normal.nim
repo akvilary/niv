@@ -228,6 +228,33 @@ proc handleNormalMode*(state: var EditorState, key: InputKey) =
     else:
       state.statusMessage = "No previous location"
 
+  of akSearchForward:
+    state.searchInput = true
+    state.mode = mCommand
+    state.commandLine = ""
+
+  of akSearchNext:
+    if state.searchMatches.len > 0:
+      state.searchIndex = (state.searchIndex + 1) mod state.searchMatches.len
+      let m = state.searchMatches[state.searchIndex]
+      state.cursor = Position(line: m.line, col: m.col)
+      state.statusMessage = $( state.searchIndex + 1) & "/" & $state.searchMatches.len
+    elif state.searchQuery.len > 0:
+      state.statusMessage = "Pattern not found: " & state.searchQuery
+    else:
+      state.statusMessage = "No previous search"
+
+  of akSearchPrev:
+    if state.searchMatches.len > 0:
+      state.searchIndex = (state.searchIndex - 1 + state.searchMatches.len) mod state.searchMatches.len
+      let m = state.searchMatches[state.searchIndex]
+      state.cursor = Position(line: m.line, col: m.col)
+      state.statusMessage = $(state.searchIndex + 1) & "/" & $state.searchMatches.len
+    elif state.searchQuery.len > 0:
+      state.statusMessage = "Pattern not found: " & state.searchQuery
+    else:
+      state.statusMessage = "No previous search"
+
   of akEnterCommand:
     state.mode = mCommand
     state.commandLine = ""

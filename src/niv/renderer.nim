@@ -24,6 +24,7 @@ const
   colRed      = 0xf7768e
   colYellow   = 0xe0af68
   colCyan     = 0x7dcfff
+  colSearchBg = 0x3d4f7a
 
 proc renderSidebar(state: EditorState, editorRows: int) =
   let sb = state.sidebar
@@ -475,6 +476,36 @@ proc renderGitPanel(state: EditorState, startRow, panelHeight, totalWidth: int) 
         stdout.write(truncHelp)
         setThemeFg()
 
+proc writeWithSearchBg(line: string, s, e: int,
+                       matchRanges: seq[tuple[startCol, endCol: int]]) =
+  ## Write line[s..<e] with search highlight bg on matched ranges
+  let lineLen = line.len
+  if matchRanges.len == 0 or s >= e:
+    if s < e and s < lineLen:
+      stdout.write(line[s..<min(e, lineLen)])
+    return
+  var col = s
+  for mr in matchRanges:
+    if mr.endCol <= s: continue
+    if mr.startCol >= e: break
+    # Gap before match
+    if col < mr.startCol:
+      let gapEnd = min(mr.startCol, e)
+      if col < gapEnd and col < lineLen:
+        stdout.write(line[col..<min(gapEnd, lineLen)])
+      col = gapEnd
+    # Match with highlight
+    let ms = max(mr.startCol, col)
+    let me = min(mr.endCol, e)
+    if ms < me and ms < lineLen:
+      setColorBg(colSearchBg)
+      stdout.write(line[ms..<min(me, lineLen)])
+      setColorBg(colBg)
+    col = max(col, me)
+  # Trailing gap
+  if col < e and col < lineLen:
+    stdout.write(line[col..<min(e, lineLen)])
+
 proc render*(state: EditorState) =
   let size = getTerminalSize()
   let totalWidth = size.width
@@ -542,8 +573,16 @@ proc render*(state: EditorState) =
       let startCol = renderLeftCol
       if startCol < line.len:
         let endCol = min(startCol + textWidth, line.len)
+
+        # Collect search match ranges for this line
+        var lineMatchRanges: seq[tuple[startCol, endCol: int]]
+        if state.searchQuery.len > 0 and state.searchMatches.len > 0 and not inCommit:
+          for m in state.searchMatches:
+            if m.line == lineNum:
+              lineMatchRanges.add((m.col, m.col + state.searchQuery.len))
+
         if useLspHighlight and lineNum < semanticLines.len and semanticLines[lineNum].len > 0:
-          # LSP semantic tokens (highest priority)
+          # LSP semantic tokens + search highlight
           let tokens = semanticLines[lineNum]
           var col = startCol
           for token in tokens:
@@ -552,7 +591,8 @@ proc render*(state: EditorState) =
             if token.col >= endCol: break
             if col < token.col:
               let gapEnd = min(token.col, endCol)
-              if col < gapEnd: stdout.write(line[col..<gapEnd])
+              if col < gapEnd:
+                writeWithSearchBg(line, col, gapEnd, lineMatchRanges)
               col = gapEnd
             let tStart = max(token.col, startCol)
             let tEndClamped = min(tEnd, endCol)
@@ -560,12 +600,13 @@ proc render*(state: EditorState) =
               let typeName = if token.tokenType < tokenLegend.len: tokenLegend[token.tokenType] else: ""
               let color = tokenColor(typeName)
               if color != 0: setColorFg(color)
-              stdout.write(line[tStart..<min(tEndClamped, line.len)])
+              writeWithSearchBg(line, tStart, min(tEndClamped, line.len), lineMatchRanges)
               if color != 0: setThemeFg()
             col = max(col, tEndClamped)
-          if col < endCol: stdout.write(line[col..<endCol])
+          if col < endCol:
+            writeWithSearchBg(line, col, endCol, lineMatchRanges)
         else:
-          stdout.write(line[startCol..<endCol])
+          writeWithSearchBg(line, startCol, endCol, lineMatchRanges)
     else:
       setColorFg(colGutter)
       stdout.write("~")
@@ -633,7 +674,10 @@ proc render*(state: EditorState) =
   setThemeColors()
   clearLine()
   if state.mode == mCommand:
-    stdout.write(":" & state.commandLine)
+    if state.searchInput:
+      stdout.write("/" & state.commandLine)
+    else:
+      stdout.write(":" & state.commandLine)
   elif state.statusMessage.len > 0:
     stdout.write(state.statusMessage)
   else:

@@ -20,6 +20,9 @@ type
     akGotoDefinition
     akGoBack
     akGotoLine
+    akSearchForward
+    akSearchNext
+    akSearchPrev
 
   InputResult* = object
     complete*: bool
@@ -117,6 +120,9 @@ proc processNormalKey*(pending: var string, key: InputKey): InputResult =
   of "p": pending = ""; return InputResult(complete: true, action: akPaste)
   of "P": pending = ""; return InputResult(complete: true, action: akPasteBefore)
   of "u": pending = ""; return InputResult(complete: true, action: akUndo)
+  of "n": pending = ""; return InputResult(complete: true, action: akSearchNext)
+  of "N": pending = ""; return InputResult(complete: true, action: akSearchPrev)
+  of "/": pending = ""; return InputResult(complete: true, action: akSearchForward)
   of ":": pending = ""; return InputResult(complete: true, action: akEnterCommand)
   else:
     # Check for <number>gg or <number>G
