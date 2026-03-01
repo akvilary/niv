@@ -396,8 +396,25 @@ proc tokenizeNim(text: string, startLine: int = 0, endLine: int = int.high): (se
       if pos < text.len and text[pos] == '*':
         advance()  # consume * but don't include in word
 
+      # Pre-check: handle enum body before main classification
+      var classifiedAsEnum = false
+      if inEnumBody and not afterTypeEquals and lastKeyword == "":
+        let lineStart = startPos - sCol
+        var indent = 0
+        var p = lineStart
+        while p < text.len and text[p] in {' ', '\t'}:
+          if text[p] == '\t': indent += 4 else: inc indent
+          inc p
+        if indent >= enumIndent and p == startPos:
+          tokens.add(NimToken(kind: ntEnumMember, line: sLine, col: sCol, length: length))
+          classifiedAsEnum = true
+        elif indent < enumIndent:
+          inEnumBody = false
+
       # Classify the identifier
-      if lastKeyword in ["proc", "func", "iterator", "converter"]:
+      if classifiedAsEnum:
+        discard
+      elif lastKeyword in ["proc", "func", "iterator", "converter"]:
         tokens.add(NimToken(kind: ntFunction, line: sLine, col: sCol, length: length))
         lastKeyword = ""
         # Check for generic params [T]
@@ -469,30 +486,6 @@ proc tokenizeNim(text: string, startLine: int = 0, endLine: int = int.high): (se
           tokens.add(NimToken(kind: ntFunction, line: sLine, col: sCol, length: length))
         else:
           tokens.add(NimToken(kind: ntProperty, line: sLine, col: sCol, length: length))
-      elif inEnumBody and not afterTypeEquals:
-        # Check if this looks like an enum member (identifier at proper indent)
-        let lineStart = startPos - sCol
-        var indent = 0
-        var p = lineStart
-        while p < text.len and text[p] in {' ', '\t'}:
-          if text[p] == '\t': indent += 4 else: inc indent
-          inc p
-        if indent >= enumIndent and p == startPos:
-          tokens.add(NimToken(kind: ntEnumMember, line: sLine, col: sCol, length: length))
-        else:
-          # Not at proper indent, might be end of enum
-          if indent < enumIndent:
-            inEnumBody = false
-          # Fallback classification
-          if word in builtinConstSet:
-            tokens.add(NimToken(kind: ntBuiltinConst, line: sLine, col: sCol, length: length))
-          elif word in kwOperatorSet:
-            tokens.add(NimToken(kind: ntOperator, line: sLine, col: sCol, length: length))
-          elif word in declKeywordSet:
-            tokens.add(NimToken(kind: ntKeyword, line: sLine, col: sCol, length: length))
-            lastKeyword = word
-          elif word in keywordSet:
-            tokens.add(NimToken(kind: ntKeyword, line: sLine, col: sCol, length: length))
       elif word in builtinConstSet:
         tokens.add(NimToken(kind: ntBuiltinConst, line: sLine, col: sCol, length: length))
       elif word in kwOperatorSet:
