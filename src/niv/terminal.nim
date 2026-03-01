@@ -37,7 +37,8 @@ proc enableRawMode*() =
 proc disableRawMode*() =
   if not rawModeEnabled:
     return
-  # Show cursor + leave alternate screen
+  # Restore cursor style + show cursor + leave alternate screen
+  stdout.write("\e[0 q")
   stdout.write("\e[?25h")
   stdout.write("\e[?1049l")
   stdout.flushFile()
@@ -190,3 +191,9 @@ proc setThemeColors*() =
 proc setThemeFg*() =
   ## Restore default theme foreground (#c0caf5)
   stdout.write("\e[38;2;192;202;245m")
+
+proc setCursorBlock*() =
+  stdout.write("\e[2 q")
+
+proc setCursorBlinkingBar*() =
+  stdout.write("\e[5 q")

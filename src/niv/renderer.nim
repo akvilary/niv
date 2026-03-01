@@ -734,15 +734,18 @@ proc render*(state: EditorState) =
     let screenRow = panelStartRow + 1 + (state.cursor.line - state.viewport.topLine)
     let screenCol = state.cursor.col - state.viewport.leftCol + commitLnWidth + 1
     moveCursor(screenRow, screenCol)
+    if state.mode == mInsert: setCursorBlinkingBar() else: setCursorBlock()
     showCursor()
   elif state.mode == mCommand:
     # Command line cursor
     moveCursor(height, 1 + state.commandLine.len + 1)
+    setCursorBlinkingBar()
     showCursor()
   else:
     let screenRow = state.cursor.line - state.viewport.topLine + 1
     let screenCol = state.cursor.col - state.viewport.leftCol + lnWidth + colOffset + 1
     moveCursor(screenRow, screenCol)
+    if state.mode == mInsert: setCursorBlinkingBar() else: setCursorBlock()
     showCursor()
 
   flushOut()
