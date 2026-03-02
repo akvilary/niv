@@ -178,9 +178,11 @@ proc handleLspEvents(state: var EditorState): bool =
             state.statusMessage = "Definition not found"
         except JsonParsingError:
           state.statusMessage = "LSP: invalid definition response"
-      of "textDocument/semanticTokens/range":
+      of "textDocument/semanticTokens/range",
+         "textDocument/semanticTokens/range:edit":
         # Direct parse: find "data":[ and extract numbers without JSON overhead
         let isBgResponse = event.requestId == bgHighlightRequestId
+        let isEditResponse = meth == "textDocument/semanticTokens/range:edit"
         let dataKey = "\"data\":["
         let dataIdx = event.responseJson.find(dataKey)
         var maxLine = 0
@@ -213,7 +215,9 @@ proc handleLspEvents(state: var EditorState): bool =
               currentCol += vals[1]
             if currentLine < semanticLines.len:
               # Skip viewport responses for lines already covered by background
-              if not isBgResponse and currentLine < bgHighlightReceivedUpTo:
+              # but never skip edit or background responses
+              if not isBgResponse and not isEditResponse and
+                 currentLine < bgHighlightReceivedUpTo:
                 continue
               if currentLine != lastClearedLine:
                 semanticLines[currentLine] = @[]

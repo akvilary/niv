@@ -54,7 +54,7 @@ proc sendEditUpdate(state: EditorState, startLine, endLine: int) =
   lspSyncedLines = state.buffer.lineCount
   resetViewportRangeCache()
   if tokenLegend.len > 0 and lspHasSemanticTokensRange:
-    sendSemanticTokensRange(startLine, endLine)
+    sendSemanticTokensRange(startLine, endLine, isEdit = true)
 
 proc handleInsertMode*(state: var EditorState, key: InputKey) =
   case key.kind

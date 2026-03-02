@@ -296,14 +296,17 @@ proc sendDidChange*(text: string) =
   inc lspDocumentVersion
   sendToLsp(buildDidChange(lspDocumentUri, lspDocumentVersion, text))
 
-proc sendSemanticTokensRange*(startLine, endLine: int) =
+proc sendSemanticTokensRange*(startLine, endLine: int, isEdit: bool = false) =
   ## Request semantic tokens for a specific line range
   if not lspHasSemanticTokensRange or lspState != lsRunning or tokenLegend.len == 0:
     return
   let stId = nextLspId()
   sendToLsp(buildSemanticTokensRange(stId, lspDocumentUri,
     startLine, 0, endLine, 0))
-  addPendingRequest(stId, "textDocument/semanticTokens/range")
+  if isEdit:
+    addPendingRequest(stId, "textDocument/semanticTokens/range:edit")
+  else:
+    addPendingRequest(stId, "textDocument/semanticTokens/range")
 
 proc resetViewportRangeCache*() =
   lastRangeTopLine = -1

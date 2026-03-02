@@ -178,12 +178,13 @@ proc tokenizePython(text: string, startLine: int = 0, endLine: int = int.high): 
   var lineIndent = 0
   var atLineStart = true
 
-  # Function parameter tracking
+  # Function parameter tracking (only for definitions: def/class)
   var inFuncParams = false
   var funcParamDepth = 0
   var isFirstParam = true
   var afterParamColon = false
   var expectParam = false  # after * or ** prefix
+  var expectDefParams = false  # true after def name, waiting for '('
 
   # Import tracking: detect 'import' and 'from' lines
   var inImportLine = false  # after 'import' keyword
@@ -356,6 +357,7 @@ proc tokenizePython(text: string, startLine: int = 0, endLine: int = int.high): 
           isFirstParam = true
           afterParamColon = false
           expectParam = false
+          expectDefParams = true
         elif lastKeyword == "class":
           tokens.add(PythonToken(kind: ptClass, line: sLine, col: sCol, length: length))
           scopeStack.add(ScopeEntry(kind: skClass, indent: lineIndent))
@@ -490,20 +492,21 @@ proc tokenizePython(text: string, startLine: int = 0, endLine: int = int.high): 
       if length > 1:
         tokens.add(PythonToken(kind: ptDecorator, line: sLine, col: sCol, length: length))
 
-    # Parentheses (track function params)
+    # Parentheses (track function definition params only)
     of '(':
       lastKeyword = ""
       afterDot = false
       if inFuncParams:
         inc funcParamDepth
-      elif funcParamDepth == 0 and tokens.len > 0 and
+      elif expectDefParams and funcParamDepth == 0 and tokens.len > 0 and
            tokens[^1].kind in {ptFunction, ptMethod}:
-        # Just saw a function/method name, now opening params
+        # Just saw a def/class name, now opening params
         inFuncParams = true
         funcParamDepth = 1
         isFirstParam = true
         afterParamColon = false
         expectParam = false
+      expectDefParams = false
       advance()
     of ')':
       lastKeyword = ""
@@ -621,10 +624,17 @@ proc tokenizePython(text: string, startLine: int = 0, endLine: int = int.high): 
       lastKeyword = ""; afterDot = false
       advance()
 
-  if startLine > 0 and tokens.len > 0:
-    var i = 0
-    while i < tokens.len and tokens[i].line < startLine: inc i
-    if i > 0: tokens = tokens[i..^1]
+  if tokens.len > 0:
+    # Filter tokens to requested range [startLine, endLine]
+    var lo = 0
+    while lo < tokens.len and tokens[lo].line < startLine: inc lo
+    var hi = tokens.len - 1
+    while hi >= lo and tokens[hi].line > endLine: dec hi
+    if lo > 0 or hi < tokens.len - 1:
+      if hi >= lo:
+        tokens = tokens[lo..hi]
+      else:
+        tokens = @[]
   return (tokens, diags)
 
 # ---------------------------------------------------------------------------
