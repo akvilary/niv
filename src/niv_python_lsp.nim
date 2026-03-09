@@ -198,6 +198,11 @@ proc tokenizePython(text: string, startLine: int = 0, endLine: int = int.high): 
   proc isIdentChar(c: char): bool =
     c in {'a'..'z', 'A'..'Z', '0'..'9', '_'}
 
+  proc isUpperConst(s: string): bool =
+    for c in s:
+      if c notin {'A'..'Z', '0'..'9', '_'}: return false
+    return s.len > 0
+
   template ch(): char =
     if pos < text.len: text[pos] else: '\0'
 
@@ -415,7 +420,8 @@ proc tokenizePython(text: string, startLine: int = 0, endLine: int = int.high): 
                (lookPos + 1 >= text.len or text[lookPos + 1] != '='):
             # Keyword argument: identifier= inside function call (not ==)
             tokens.add(PythonToken(kind: ptParameter, line: sLine, col: sCol, length: length))
-          # else: plain variable, no token emitted
+          elif isUpperConst(word):
+            tokens.add(PythonToken(kind: ptBuiltinConst, line: sLine, col: sCol, length: length))
           lastKeyword = ""
 
     # Regular strings
