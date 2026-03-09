@@ -34,6 +34,7 @@ type
     ptProperty       # 14 - obj.attr (after dot)
     ptNamespace      # 15 - module name in import/from
     ptBuiltinConst   # 16 - True, False, None
+    ptDunder         # 17 - __name__, __init__, etc.
 
   PythonToken = object
     kind: PythonTokenKind
@@ -71,6 +72,7 @@ const
   stProperty = 14
   stNamespace = 15
   stBuiltinConst = 16
+  stDunder = 17
 
 # ---------------------------------------------------------------------------
 # Scope tracking for context-aware tokenization
@@ -202,6 +204,13 @@ proc tokenizePython(text: string, startLine: int = 0, endLine: int = int.high): 
     for c in s:
       if c notin {'A'..'Z', '0'..'9', '_'}: return false
     return s.len > 0
+
+  proc isDunder(s: string): bool =
+    if s.len < 5: return false
+    if s[0] != '_' or s[1] != '_' or s[^1] != '_' or s[^2] != '_': return false
+    for i in 2..<s.len - 2:
+      if s[i] notin {'a'..'z', '_'}: return false
+    return true
 
   template ch(): char =
     if pos < text.len: text[pos] else: '\0'
@@ -420,6 +429,8 @@ proc tokenizePython(text: string, startLine: int = 0, endLine: int = int.high): 
                (lookPos + 1 >= text.len or text[lookPos + 1] != '='):
             # Keyword argument: identifier= inside function call (not ==)
             tokens.add(PythonToken(kind: ptParameter, line: sLine, col: sCol, length: length))
+          elif isDunder(word):
+            tokens.add(PythonToken(kind: ptDunder, line: sLine, col: sCol, length: length))
           elif isUpperConst(word):
             tokens.add(PythonToken(kind: ptBuiltinConst, line: sLine, col: sCol, length: length))
           lastKeyword = ""
@@ -685,6 +696,7 @@ proc encodeSemanticTokens(tokens: seq[PythonToken]): seq[int] =
       of ptProperty: stProperty
       of ptNamespace: stNamespace
       of ptBuiltinConst: stBuiltinConst
+      of ptDunder: stDunder
     result.add(deltaLine)
     result.add(deltaCol)
     result.add(tok.length)
@@ -1153,7 +1165,7 @@ proc main() =
                              "function", "method", "class", "macro",
                              "builtinFunction", "operator", "type", "parameter",
                              "selfParameter", "clsParameter", "property",
-                             "namespace", "builtinConstant"],
+                             "namespace", "builtinConstant", "magicVariable"],
               "tokenModifiers": []
             },
             "full": true,

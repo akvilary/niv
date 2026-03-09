@@ -35,6 +35,8 @@ proc tokenColor*(typeName: string): int =
     0x73daca   # Teal
   of "builtinConstant":
     0xff9e64   # Orange
+  of "magicVariable":
+    0x7dcfff   # Light blue
   of "variable", "enumMember":
     0          # Default
   else:
