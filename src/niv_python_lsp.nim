@@ -122,6 +122,7 @@ var kwOperatorSet: HashSet[string]
 var builtinConstSet: HashSet[string]
 var builtinTypeSet: HashSet[string]
 var builtinFuncSet: HashSet[string]
+let selfParamSet = ["self", "cls"].toHashSet()
 
 proc initLookupTables() =
   for kw in pythonKeywords: keywordSet.incl(kw)
@@ -401,6 +402,8 @@ proc tokenizePython(text: string, startLine: int = 0, endLine: int = int.high): 
           tokens.add(PythonToken(kind: ptType, line: sLine, col: sCol, length: length))
         elif word in builtinFuncSet:
           tokens.add(PythonToken(kind: ptBuiltin, line: sLine, col: sCol, length: length))
+        elif word in selfParamSet:
+          tokens.add(PythonToken(kind: ptSelfParam, line: sLine, col: sCol, length: length))
         else:
           # Lookahead: identifier followed by '(' → function call
           var lookPos = pos
