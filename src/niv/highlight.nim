@@ -15,7 +15,7 @@ proc tokenColor*(typeName: string): int =
     0x9ece6a   # Green
   of "comment":
     0x565f89   # Gray
-  of "number":
+  of "number", "enumMember":
     0xff9e64   # Orange
   of "operator":
     0x89ddff   # Cyan
@@ -37,7 +37,7 @@ proc tokenColor*(typeName: string): int =
     0xff9e64   # Orange
   of "magicVariable":
     0x7dcfff   # Light blue
-  of "variable", "enumMember":
+  of "variable":
     0          # Default
   else:
     0
