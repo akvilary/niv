@@ -191,6 +191,9 @@ proc tokenizePython(text: string, startLine: int = 0, endLine: int = int.high): 
   var inFromLine = false    # after 'from' keyword, before 'import'
   var afterDot = false      # identifier after a dot
 
+  # Function call parenthesis depth (for keyword argument detection)
+  var callDepth = 0
+
   proc isIdentChar(c: char): bool =
     c in {'a'..'z', 'A'..'Z', '0'..'9', '_'}
 
@@ -405,6 +408,10 @@ proc tokenizePython(text: string, startLine: int = 0, endLine: int = int.high): 
             inc lookPos
           if lookPos < text.len and text[lookPos] == '(':
             tokens.add(PythonToken(kind: ptFunction, line: sLine, col: sCol, length: length))
+          elif callDepth > 0 and lookPos < text.len and text[lookPos] == '=' and
+               (lookPos + 1 >= text.len or text[lookPos + 1] != '='):
+            # Keyword argument: identifier= inside function call (not ==)
+            tokens.add(PythonToken(kind: ptParameter, line: sLine, col: sCol, length: length))
           # else: plain variable, no token emitted
           lastKeyword = ""
 
@@ -492,7 +499,7 @@ proc tokenizePython(text: string, startLine: int = 0, endLine: int = int.high): 
       if length > 1:
         tokens.add(PythonToken(kind: ptDecorator, line: sLine, col: sCol, length: length))
 
-    # Parentheses (track function definition params only)
+    # Parentheses (track function definition params and call depth)
     of '(':
       lastKeyword = ""
       afterDot = false
@@ -500,12 +507,13 @@ proc tokenizePython(text: string, startLine: int = 0, endLine: int = int.high): 
         inc funcParamDepth
       elif expectDefParams and funcParamDepth == 0 and tokens.len > 0 and
            tokens[^1].kind in {ptFunction, ptMethod}:
-        # Just saw a def/class name, now opening params
         inFuncParams = true
         funcParamDepth = 1
         isFirstParam = true
         afterParamColon = false
         expectParam = false
+      else:
+        inc callDepth
       expectDefParams = false
       advance()
     of ')':
@@ -516,6 +524,8 @@ proc tokenizePython(text: string, startLine: int = 0, endLine: int = int.high): 
         if funcParamDepth <= 0:
           inFuncParams = false
           funcParamDepth = 0
+      elif callDepth > 0:
+        dec callDepth
       advance()
 
     # Comma in func params
