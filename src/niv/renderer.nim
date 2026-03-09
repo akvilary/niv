@@ -10,6 +10,7 @@ import lsp_client
 import lsp_types
 import highlight
 import git
+import unicode_width
 
 # Tokyo Night Storm palette
 const
@@ -207,7 +208,7 @@ proc renderGitCommitEditor(state: EditorState, startRow, panelHeight, totalWidth
       let line = state.buffer.getLine(lineNum)
       let startCol = state.viewport.leftCol
       if startCol < line.len:
-        let endCol = min(startCol + textWidth, line.len)
+        let endCol = byteOffsetForWidth(line, startCol, textWidth)
         stdout.write(line[startCol..<endCol])
     else:
       setColorFg(colGutter)
@@ -585,7 +586,7 @@ proc render*(state: EditorState) =
       let line = renderBuffer.getLine(lineNum)
       let startCol = renderLeftCol
       if startCol < line.len:
-        let endCol = min(startCol + textWidth, line.len)
+        let endCol = byteOffsetForWidth(line, startCol, textWidth)
 
         # Collect search match ranges for this line
         var lineMatchRanges: seq[tuple[startCol, endCol: int]]

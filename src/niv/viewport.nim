@@ -2,6 +2,7 @@
 
 import types
 import buffer
+import unicode_width
 
 proc lineNumberWidth*(lineCount: int): int =
   ## How many columns line numbers need (including 1 space padding)
@@ -19,11 +20,13 @@ proc adjustViewport*(vp: var Viewport, cursor: Position, buf: Buffer) =
   elif cursor.line >= vp.topLine + vp.height:
     vp.topLine = cursor.line - vp.height + 1
 
-  # Horizontal scrolling
+  # Horizontal scrolling (cursor.col is byte offset, textWidth is display columns)
   let lnw = lineNumberWidth(buf.lineCount)
   let textWidth = vp.width - lnw
   if textWidth > 0:
+    let line = buf.getLine(cursor.line)
+    let rightEdgeByte = byteOffsetForWidth(line, vp.leftCol, textWidth)
     if cursor.col < vp.leftCol:
       vp.leftCol = cursor.col
-    elif cursor.col >= vp.leftCol + textWidth:
-      vp.leftCol = cursor.col - textWidth + 1
+    elif cursor.col >= rightEdgeByte:
+      vp.leftCol = byteOffsetBackward(line, cursor.col, textWidth - 1)
