@@ -1,10 +1,6 @@
 ## Syntax highlighting via LSP semantic tokens
 
-type
-  SemanticToken* = object
-    col*: int        ## Start column (0-indexed)
-    length*: int     ## Token length in characters
-    tokenType*: int  ## Index into tokenLegend
+import types
 
 ## Global state: populated from LSP responses
 var tokenLegend*: seq[string]       ## Token type names from server capabilities
@@ -79,6 +75,21 @@ proc parseSemanticTokens*(data: seq[int], lineCount: int) =
 
 proc clearSemanticTokens*() =
   semanticLines = @[]
+
+proc captureTokenLines*(startLine, endLine: int): seq[seq[SemanticToken]] =
+  ## Copy token lines for [startLine..<endLine]
+  if startLine >= semanticLines.len:
+    return @[]
+  let e = min(endLine, semanticLines.len)
+  for i in startLine..<e:
+    result.add(semanticLines[i])
+
+proc applyTokenDiff*(startLine: int, oldCount: int, newLines: seq[seq[SemanticToken]]) =
+  ## Replace semanticLines[startLine..<startLine+oldCount] with newLines
+  if semanticLines.len == 0 and newLines.len == 0:
+    return
+  let removeEnd = min(startLine + oldCount, semanticLines.len)
+  semanticLines = semanticLines[0..<startLine] & newLines & semanticLines[removeEnd..^1]
 
 proc clearTokenLegend*() =
   tokenLegend = @[]

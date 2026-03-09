@@ -132,14 +132,15 @@ proc handleNormalMode*(state: var EditorState, key: InputKey) =
       state.buffer.lineIndex[lineNum + 1]
     else:
       state.buffer.data.len
+    state.buffer.undo.ensureTokensCaptured(lineNum)
     state.buffer.undo.pushUndo(UndoEntry(
       op: uoInsert,
       offset: insertOffset,
       text: insertText,
     ))
-    state.buffer.undo.commitGroup()
     state.buffer.insertLine(lineNum + 1, indent)
     insertSemanticLine(lineNum + 1)
+    state.buffer.undo.trackLineInserted()
     state.cursor = Position(line: lineNum + 1, col: indent.len)
     state.mode = mInsert
   of akInsertLineAbove:
@@ -151,20 +152,22 @@ proc handleNormalMode*(state: var EditorState, key: InputKey) =
       indent = state.buffer.getIndent(lineNum - 1)
     let insertText = indent & "\n"
     let insertOffset = state.buffer.lineIndex[lineNum]
+    state.buffer.undo.ensureTokensCaptured(lineNum)
     state.buffer.undo.pushUndo(UndoEntry(
       op: uoInsert,
       offset: insertOffset,
       text: insertText,
     ))
-    state.buffer.undo.commitGroup()
     state.buffer.insertLine(lineNum, indent)
     insertSemanticLine(lineNum)
+    state.buffer.undo.trackLineInserted()
     state.cursor = Position(line: lineNum, col: indent.len)
     state.mode = mInsert
 
   # Editing
   of akDeleteChar:
     if state.buffer.lineLen(state.cursor.line) > 0:
+      state.buffer.undo.ensureTokensCaptured(state.cursor.line)
       let delOffset = state.buffer.byteOffsetOf(state.cursor)
       let deleted = state.buffer.deleteRune(state.cursor)
       state.buffer.undo.pushUndo(UndoEntry(
@@ -187,14 +190,16 @@ proc handleNormalMode*(state: var EditorState, key: InputKey) =
     else:
       state.buffer.data.len
     let deletedText = state.buffer.data[s..<e]
+    state.buffer.undo.ensureTokensCaptured(lineNum)
     state.buffer.undo.pushUndo(UndoEntry(
       op: uoDelete,
       offset: s,
       text: deletedText,
     ))
-    state.buffer.undo.commitGroup()
     discard state.buffer.deleteLine(lineNum)
     deleteSemanticLine(lineNum)
+    state.buffer.undo.trackLineRemoved()
+    state.buffer.undo.commitGroup()
     state.cursor = clampCursor(state.buffer, state.cursor, mNormal)
 
   of akYankLine:
@@ -213,14 +218,16 @@ proc handleNormalMode*(state: var EditorState, key: InputKey) =
           state.buffer.lineIndex[lineNum]
         else:
           state.buffer.data.len
+        state.buffer.undo.ensureTokensCaptured(state.cursor.line)
         state.buffer.undo.pushUndo(UndoEntry(
           op: uoInsert,
           offset: insertOffset,
           text: insertText,
         ))
-        state.buffer.undo.commitGroup()
         state.buffer.insertLine(lineNum, text)
         insertSemanticLine(lineNum)
+        state.buffer.undo.trackLineInserted()
+        state.buffer.undo.commitGroup()
         state.cursor = Position(line: lineNum, col: 0)
 
   of akPasteBefore:
@@ -230,23 +237,39 @@ proc handleNormalMode*(state: var EditorState, key: InputKey) =
         let text = state.yankRegister
         let insertText = text & "\n"
         let insertOffset = state.buffer.lineIndex[lineNum]
+        state.buffer.undo.ensureTokensCaptured(lineNum)
         state.buffer.undo.pushUndo(UndoEntry(
           op: uoInsert,
           offset: insertOffset,
           text: insertText,
         ))
-        state.buffer.undo.commitGroup()
         state.buffer.insertLine(lineNum, text)
         insertSemanticLine(lineNum)
+        state.buffer.undo.trackLineInserted()
+        state.buffer.undo.commitGroup()
         state.cursor = Position(line: lineNum, col: 0)
 
   of akUndo:
-    let pos = state.buffer.undo.undo(state.buffer)
-    state.cursor = clampCursor(state.buffer, pos, mNormal)
+    let res = state.buffer.undo.undo(state.buffer)
+    state.cursor = clampCursor(state.buffer, res.cursor, mNormal)
+    # Restore pre-edit tokens from diff
+    if res.tokenDiff.linesBefore.len > 0 or res.tokenDiff.linesAfter.len > 0:
+      applyTokenDiff(res.tokenDiff.startLine, res.tokenDiff.linesAfter.len, res.tokenDiff.linesBefore)
+    if lspState == lsRunning:
+      sendDidChange(state.buffer.data)
+      lspSyncedLines = state.buffer.lineCount
+      resetViewportRangeCache()
 
   of akRedo:
-    let pos = state.buffer.undo.redo(state.buffer)
-    state.cursor = clampCursor(state.buffer, pos, mNormal)
+    let res = state.buffer.undo.redo(state.buffer)
+    state.cursor = clampCursor(state.buffer, res.cursor, mNormal)
+    # Restore post-edit tokens from diff
+    if res.tokenDiff.linesBefore.len > 0 or res.tokenDiff.linesAfter.len > 0:
+      applyTokenDiff(res.tokenDiff.startLine, res.tokenDiff.linesBefore.len, res.tokenDiff.linesAfter)
+    if lspState == lsRunning:
+      sendDidChange(state.buffer.data)
+      lspSyncedLines = state.buffer.lineCount
+      resetViewportRangeCache()
 
   of akGotoDefinition:
     if lspState == lsRunning and lspDocumentUri.len > 0:

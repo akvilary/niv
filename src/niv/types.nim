@@ -38,6 +38,16 @@ type
     line*: int      # 0-indexed
     col*: int       # 0-indexed byte offset
 
+  SemanticToken* = object
+    col*: int        ## Start column (0-indexed)
+    length*: int     ## Token length in characters
+    tokenType*: int  ## Index into tokenLegend
+
+  TokenDiff* = object
+    startLine*: int
+    linesBefore*: seq[seq[SemanticToken]]
+    linesAfter*: seq[seq[SemanticToken]]
+
   UndoOp* = enum
     uoInsert
     uoDelete
@@ -49,11 +59,16 @@ type
 
   UndoGroup* = object
     entries*: seq[UndoEntry]
+    tokenDiff*: TokenDiff
 
   UndoHistory* = object
     undoStack*: seq[UndoGroup]
     redoStack*: seq[UndoGroup]
     current*: UndoGroup
+    captureActive*: bool
+    captureMinLine*: int
+    captureMaxLine*: int        ## exclusive, original "before" range
+    captureAfterEndLine*: int   ## exclusive, current "after" range
 
   Buffer* = object
     data*: string            ## Raw file bytes (newlines preserved)

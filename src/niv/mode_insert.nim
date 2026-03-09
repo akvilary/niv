@@ -60,7 +60,8 @@ proc handleInsertMode*(state: var EditorState, key: InputKey) =
   case key.kind
   of kkEscape:
     closeCompletion()
-    # Commit undo group and return to Normal mode
+    # Finish token capture and commit undo group
+    state.buffer.undo.finishTokenCapture()
     state.buffer.undo.commitGroup()
     state.mode = mNormal
     # Clamp cursor (in Normal, cursor can't be past last char)
@@ -74,6 +75,7 @@ proc handleInsertMode*(state: var EditorState, key: InputKey) =
     if completionState.active:
       closeCompletion()
     let text = $key.ch
+    state.buffer.undo.ensureTokensCaptured(state.cursor.line)
     state.buffer.undo.pushUndo(UndoEntry(
       op: uoInsert,
       offset: state.buffer.byteOffsetOf(state.cursor),
@@ -92,6 +94,7 @@ proc handleInsertMode*(state: var EditorState, key: InputKey) =
       let splitCol = state.cursor.col
       let indent = state.buffer.getIndent(state.cursor.line)
       let insertText = "\n" & indent
+      state.buffer.undo.ensureTokensCaptured(state.cursor.line)
       state.buffer.undo.pushUndo(UndoEntry(
         op: uoInsert,
         offset: state.buffer.byteOffsetOf(state.cursor),
@@ -102,6 +105,7 @@ proc handleInsertMode*(state: var EditorState, key: InputKey) =
       state.cursor.col = 0
       # Split semantic tokens at the split point
       splitSemanticLine(state.cursor.line - 1, splitCol)
+      state.buffer.undo.trackLineInserted()
       # Auto-indent: insert indentation at start of new line
       if indent.len > 0:
         for r in indent.runes:
@@ -113,6 +117,7 @@ proc handleInsertMode*(state: var EditorState, key: InputKey) =
     if completionState.active:
       closeCompletion()
     if state.cursor.col > 0:
+      state.buffer.undo.ensureTokensCaptured(state.cursor.line)
       let line = state.buffer.getLine(state.cursor.line)
       state.cursor.col = prevRuneStart(line, state.cursor.col)
       let deleted = state.buffer.deleteRune(state.cursor)
@@ -125,6 +130,9 @@ proc handleInsertMode*(state: var EditorState, key: InputKey) =
       shiftTokensLeft(state.cursor.line, state.cursor.col, deleted.len)
       sendEditUpdate(state, state.cursor.line, state.cursor.line)
     elif state.cursor.line > 0:
+      # Capture both lines before join
+      state.buffer.undo.ensureTokensCaptured(state.cursor.line - 1)
+      state.buffer.undo.ensureTokensCaptured(state.cursor.line)
       # Join with previous line
       let prevLineLen = state.buffer.lineLen(state.cursor.line - 1)
       let joinOffset = state.buffer.byteOffsetOf(Position(line: state.cursor.line - 1, col: prevLineLen))
@@ -138,12 +146,14 @@ proc handleInsertMode*(state: var EditorState, key: InputKey) =
       state.cursor.col = prevLineLen
       # Merge semantic tokens from joined line
       joinSemanticLines(state.cursor.line, state.cursor.col)
+      state.buffer.undo.trackLineRemoved()
       sendEditUpdate(state, state.cursor.line, state.cursor.line)
 
   of kkDelete:
     if completionState.active:
       closeCompletion()
     if state.cursor.col < state.buffer.lineLen(state.cursor.line):
+      state.buffer.undo.ensureTokensCaptured(state.cursor.line)
       let delOffset = state.buffer.byteOffsetOf(state.cursor)
       let deleted = state.buffer.deleteRune(state.cursor)
       state.buffer.undo.pushUndo(UndoEntry(
@@ -155,6 +165,9 @@ proc handleInsertMode*(state: var EditorState, key: InputKey) =
       shiftTokensLeft(state.cursor.line, state.cursor.col, deleted.len)
       sendEditUpdate(state, state.cursor.line, state.cursor.line)
     elif state.cursor.line < state.buffer.lastLine:
+      # Capture both lines before join
+      state.buffer.undo.ensureTokensCaptured(state.cursor.line)
+      state.buffer.undo.ensureTokensCaptured(state.cursor.line + 1)
       let joinCol = state.buffer.lineLen(state.cursor.line)
       let joinOffset = state.buffer.byteOffsetOf(Position(line: state.cursor.line, col: joinCol))
       state.buffer.undo.pushUndo(UndoEntry(
@@ -165,12 +178,14 @@ proc handleInsertMode*(state: var EditorState, key: InputKey) =
       state.buffer.joinLines(state.cursor.line)
       # Merge semantic tokens from joined line
       joinSemanticLines(state.cursor.line, joinCol)
+      state.buffer.undo.trackLineRemoved()
       sendEditUpdate(state, state.cursor.line, state.cursor.line)
 
   of kkTab:
     if completionState.active:
       acceptCompletion(state)
     else:
+      state.buffer.undo.ensureTokensCaptured(state.cursor.line)
       let tabSize = if activeLspLanguageId == "python": 4 else: 2
       for _ in 0..<tabSize:
         state.buffer.undo.pushUndo(UndoEntry(
