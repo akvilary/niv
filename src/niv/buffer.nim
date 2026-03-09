@@ -75,7 +75,11 @@ proc lineEndByte*(buf: Buffer, lineNum: int): int =
     # Next line starts after \n, so content ends at lineIndex[lineNum+1] - 1
     buf.lineIndex[lineNum + 1] - 1
   else:
-    buf.data.len
+    # Last line: exclude trailing \n if present
+    if buf.data.len > 0 and buf.data[^1] == '\n':
+      buf.data.len - 1
+    else:
+      buf.data.len
 
 proc getLine*(buf: Buffer, lineNum: int): string =
   if lineNum >= 0 and lineNum < buf.lineIndex.len:
