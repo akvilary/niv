@@ -269,7 +269,7 @@ proc handleNormalMode*(state: var EditorState, key: InputKey) =
             sendSemanticTokensRange(0, min(state.buffer.lineCount - 1, 50))
             startBgHighlight(state.buffer.lineCount)
       state.cursor = jump.cursor
-      state.viewport.topByte = jump.topByte
+      state.viewport.topLine = jump.topLine
       state.viewport.leftCol = 0
     else:
       state.statusMessage = "No previous location"

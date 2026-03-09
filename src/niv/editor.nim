@@ -77,7 +77,7 @@ proc requestViewportRangeTokens(state: EditorState) =
   if not lspHasSemanticTokensRange or lspState != lsRunning or tokenLegend.len == 0:
     return
   let h = state.viewport.height
-  let curTopLine = state.buffer.byteToLine(state.viewport.topByte)
+  let curTopLine = state.viewport.topLine
   let startLine = max(0, curTopLine - h)
   let endLine = min(curTopLine + h + h,
                     state.buffer.lineCount) - 1
@@ -146,7 +146,7 @@ proc handleLspEvents(state: var EditorState): bool =
 
           if locations.len > 0:
             # Save current position for gb (go back)
-            pushJump(state.buffer.filePath, state.cursor, state.viewport.topByte)
+            pushJump(state.buffer.filePath, state.cursor, state.viewport.topLine)
             # Prefer .py over .pyi stub files
             var loc = locations[0]
             for candidate in locations:
@@ -174,7 +174,7 @@ proc handleLspEvents(state: var EditorState): bool =
                   startBgHighlight(state.buffer.lineCount)
 
             state.cursor = Position(line: line, col: col)
-            state.viewport.topByte = 0
+            state.viewport.topLine = 0
             state.viewport.leftCol = 0
             state.statusMessage = ""
           else:
@@ -325,7 +325,7 @@ proc run*(state: var EditorState) =
 
   var needsRedraw = true
   var prevMode = state.mode
-  var prevTopByte = -1
+  var prevTopLine = -1
 
   while state.running:
     # Update viewport dimensions
@@ -351,16 +351,15 @@ proc run*(state: var EditorState) =
 
     # Request range tokens when viewport scrolls
     if lspHasSemanticTokensRange and lspState == lsRunning and
-       tokenLegend.len > 0 and state.viewport.topByte != prevTopByte:
-      let curTopLine = state.buffer.byteToLine(state.viewport.topByte)
-      let viewportEnd = min(curTopLine + state.viewport.height,
+       tokenLegend.len > 0 and state.viewport.topLine != prevTopLine:
+      let viewportEnd = min(state.viewport.topLine + state.viewport.height,
                             state.buffer.lineCount)
       # Skip if background already highlighted this area
       let bgDone = bgHighlightNextLine < 0 and bgHighlightTotalLines > 0
       if not bgDone or viewportEnd > bgHighlightTotalLines:
         syncLspToLine(state, viewportEnd)
         requestViewportRangeTokens(state)
-      prevTopByte = state.viewport.topByte
+      prevTopLine = state.viewport.topLine
 
     # Render only when something changed
     if needsRedraw:

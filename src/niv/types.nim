@@ -66,7 +66,7 @@ type
     estimatedTotalLines*: int ## Estimated from first chunk
 
   Viewport* = object
-    topByte*: int   ## Byte offset of first visible line
+    topLine*: int   ## First visible line number
     leftCol*: int
     height*: int    # usable rows for text
     width*: int     # total terminal width
@@ -123,7 +123,7 @@ type
     inCommitInput*: bool
     savedBuffer*: Buffer
     savedCursor*: Position
-    savedTopByte*: int
+    savedTopLine*: int
     confirmDiscard*: bool
 
   SearchMatch* = object

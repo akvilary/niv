@@ -124,7 +124,7 @@ proc executeCommand*(state: var EditorState, cmd: ExCommand, arg: string) =
       resetViewportRangeCache()
       state.buffer = newBuffer(arg)
       state.cursor = Position(line: 0, col: 0)
-      state.viewport.topByte = 0
+      state.viewport.topLine = 0
       state.viewport.leftCol = 0
       state.statusMessage = "\"" & arg & "\""
       switchLsp(arg)
@@ -141,7 +141,7 @@ proc executeCommand*(state: var EditorState, cmd: ExCommand, arg: string) =
       resetBgHighlight()
       state.buffer = newBuffer(state.buffer.filePath)
       state.cursor = Position(line: 0, col: 0)
-      state.viewport.topByte = 0
+      state.viewport.topLine = 0
       state.viewport.leftCol = 0
       state.statusMessage = "\"" & state.buffer.filePath & "\" reloaded"
       if lspIsActive():

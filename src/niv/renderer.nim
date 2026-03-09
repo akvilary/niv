@@ -196,7 +196,7 @@ proc renderGitCommitEditor(state: EditorState, startRow, panelHeight, totalWidth
     setThemeColors()
     clearLine()
 
-    let lineNum = state.buffer.byteToLine(state.viewport.topByte) + row
+    let lineNum = state.viewport.topLine + row
     if lineNum < state.buffer.lineCount:
       let numStr = $(lineNum + 1)
       let padding = lnWidth - numStr.len - 1
@@ -534,9 +534,8 @@ proc render*(state: EditorState) =
 
   # Choose which buffer to render in the editor area
   let renderBuffer = if inCommit: state.gitPanel.savedBuffer else: state.buffer
-  let vpTopLine = state.buffer.byteToLine(state.viewport.topByte)
-  let renderTopLine = if inCommit:
-    state.gitPanel.savedBuffer.byteToLine(state.gitPanel.savedTopByte)
+  let vpTopLine = state.viewport.topLine
+  let renderTopLine = if inCommit: state.gitPanel.savedTopLine
   else: vpTopLine
   let renderLeftCol = if inCommit: 0 else: state.viewport.leftCol
 

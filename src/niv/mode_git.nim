@@ -17,11 +17,11 @@ proc enterCommitInput*(state: var EditorState) =
     return
   state.gitPanel.savedBuffer = state.buffer
   state.gitPanel.savedCursor = state.cursor
-  state.gitPanel.savedTopByte = state.viewport.topByte
+  state.gitPanel.savedTopLine = state.viewport.topLine
   state.gitPanel.inCommitInput = true
   state.buffer = newBuffer("")
   state.cursor = Position(line: 0, col: 0)
-  state.viewport.topByte = 0
+  state.viewport.topLine = 0
   state.viewport.leftCol = 0
   state.mode = mInsert
 
@@ -29,7 +29,7 @@ proc cancelCommitInput*(state: var EditorState) =
   ## Restore original buffer, cancel commit
   state.buffer = state.gitPanel.savedBuffer
   state.cursor = state.gitPanel.savedCursor
-  state.viewport.topByte = state.gitPanel.savedTopByte
+  state.viewport.topLine = state.gitPanel.savedTopLine
   state.viewport.leftCol = 0
   state.gitPanel.inCommitInput = false
   state.mode = mGit
@@ -44,7 +44,7 @@ proc executeCommitInput*(state: var EditorState) =
   # Restore original buffer
   state.buffer = state.gitPanel.savedBuffer
   state.cursor = state.gitPanel.savedCursor
-  state.viewport.topByte = state.gitPanel.savedTopByte
+  state.viewport.topLine = state.gitPanel.savedTopLine
   state.viewport.leftCol = 0
   state.gitPanel.inCommitInput = false
   state.mode = mGit

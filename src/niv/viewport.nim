@@ -1,4 +1,4 @@
-## Viewport: scrolling calculations with byte offset
+## Viewport: scrolling calculations
 
 import types
 import buffer
@@ -12,23 +12,12 @@ proc lineNumberWidth*(lineCount: int): int =
     digits += 1
   result = digits + 1  # +1 for space after number
 
-proc topLine*(vp: Viewport, buf: Buffer): int =
-  ## Derive current top line from topByte
-  buf.byteToLine(vp.topByte)
-
 proc adjustViewport*(vp: var Viewport, cursor: Position, buf: Buffer) =
-  let curTopLine = buf.byteToLine(vp.topByte)
-
   # Vertical scrolling
-  var newTopLine = curTopLine
-  if cursor.line < newTopLine:
-    newTopLine = cursor.line
-  elif cursor.line >= newTopLine + vp.height:
-    newTopLine = cursor.line - vp.height + 1
-
-  # Update topByte from the resolved line
-  if newTopLine != curTopLine:
-    vp.topByte = buf.lineToByteOffset(newTopLine)
+  if cursor.line < vp.topLine:
+    vp.topLine = cursor.line
+  elif cursor.line >= vp.topLine + vp.height:
+    vp.topLine = cursor.line - vp.height + 1
 
   # Horizontal scrolling
   let lnw = lineNumberWidth(buf.lineCount)
