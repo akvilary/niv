@@ -64,8 +64,12 @@ proc syncLspToLine(state: EditorState, targetLine: int) =
   let syncTo = min(targetLine, state.buffer.lineCount)
   if syncTo <= lspSyncedLines:
     return
-  let text = state.buffer.lines[0..<syncTo].join("\n")
-  sendDidChange(text)
+  # Send data up to the byte offset of syncTo line
+  let endByte = if syncTo < state.buffer.lineIndex.len:
+    state.buffer.lineIndex[syncTo]
+  else:
+    state.buffer.data.len
+  sendDidChange(state.buffer.data[0..<endByte])
   lspSyncedLines = syncTo
 
 proc requestViewportRangeTokens(state: EditorState) =
@@ -73,8 +77,9 @@ proc requestViewportRangeTokens(state: EditorState) =
   if not lspHasSemanticTokensRange or lspState != lsRunning or tokenLegend.len == 0:
     return
   let h = state.viewport.height
-  let startLine = max(0, state.viewport.topLine - h)
-  let endLine = min(state.viewport.topLine + h + h,
+  let curTopLine = state.buffer.byteToLine(state.viewport.topByte)
+  let startLine = max(0, curTopLine - h)
+  let endLine = min(curTopLine + h + h,
                     state.buffer.lineCount) - 1
   if startLine == lastRangeTopLine and endLine == lastRangeEndLine:
     return  # Already requested this exact range
@@ -118,8 +123,7 @@ proc handleLspEvents(state: var EditorState): bool =
         sendToLsp(buildInitialized())
         # Send didOpen for current file
         if state.buffer.filePath.len > 0:
-          let text = state.buffer.lines.join("\n")
-          sendDidOpen(state.buffer.filePath, text)
+          sendDidOpen(state.buffer.filePath, state.buffer.data)
           lspSyncedLines = state.buffer.lineCount
           # Request range tokens for viewport
           if lspHasSemanticTokensRange and tokenLegend.len > 0:
@@ -142,7 +146,7 @@ proc handleLspEvents(state: var EditorState): bool =
 
           if locations.len > 0:
             # Save current position for gb (go back)
-            pushJump(state.buffer.filePath, state.cursor, state.viewport.topLine)
+            pushJump(state.buffer.filePath, state.cursor, state.viewport.topByte)
             # Prefer .py over .pyi stub files
             var loc = locations[0]
             for candidate in locations:
@@ -163,15 +167,14 @@ proc handleLspEvents(state: var EditorState): bool =
               switchLsp(filePath)
               # If same-language LSP is still running, send didOpen immediately
               if lspState == lsRunning:
-                let text = state.buffer.lines.join("\n")
-                sendDidOpen(filePath, text)
+                sendDidOpen(filePath, state.buffer.data)
                 lspSyncedLines = state.buffer.lineCount
                 if lspHasSemanticTokensRange and tokenLegend.len > 0:
                   requestViewportRangeTokens(state)
                   startBgHighlight(state.buffer.lineCount)
 
             state.cursor = Position(line: line, col: col)
-            state.viewport.topLine = 0
+            state.viewport.topByte = 0
             state.viewport.leftCol = 0
             state.statusMessage = ""
           else:
@@ -272,42 +275,39 @@ proc handleLspEvents(state: var EditorState): bool =
       lspSyncedLines = 0
 
 var pendingFullLspSync = false
-const LspSyncChunkSize = 50_000  ## lines per tick (~3ms)
-var lspSyncBuf: string
-var lspSyncIdx: int
 
-const MaxLinesPerPoll = 200_000  ## max lines to process per tick
+const MaxBytesPerPoll = 16 * 1024 * 1024  ## max bytes to process per tick
 
 proc handleFileLoaderEvents(state: var EditorState): bool =
-  ## Poll and process file loader chunks. Returns true if lines were added.
+  ## Poll and process file loader chunks. Returns true if data was added.
   result = false
   if state.buffer.fullyLoaded:
     return
 
-  var linesProcessed = 0
-  while linesProcessed < MaxLinesPerPoll:
+  var bytesProcessed = 0
+  while bytesProcessed < MaxBytesPerPoll:
     var pollResult = pollFileLoader()
     if not pollResult[0]:
       break
     var chunk = move pollResult[1]
     result = true
     case chunk.kind
-    of fckLines:
-      let linesPtr = chunk.lines
-      if linesPtr != nil and linesPtr[].len > 0:
-        let oldLen = state.buffer.lines.len
-        state.buffer.lines.setLen(oldLen + linesPtr[].len)
-        for i in 0..<linesPtr[].len:
-          state.buffer.lines[oldLen + i] = move linesPtr[][i]
-        linesProcessed += linesPtr[].len
+    of fckData:
+      if chunk.dataPtr != nil and chunk.dataPtr[].len > 0:
+        let oldLen = state.buffer.data.len
+        # Normalize \r\n to \n and append
+        let normalized = chunk.dataPtr[].replace("\r\n", "\n")
+        state.buffer.data.add(normalized)
+        # Extend lineIndex for newly appended bytes
+        state.buffer.extendLineIndex(oldLen)
+        bytesProcessed += normalized.len
       state.buffer.loadedBytes += chunk.bytesRead
-      freeFileChunkLines(chunk)
+      freeFileChunkData(chunk)
     of fckDone:
       state.buffer.fullyLoaded = true
-      # Remove trailing empty line if file ends with newline
-      if state.buffer.lines.len > 1 and state.buffer.lines[^1].len == 0:
-        state.buffer.lines.setLen(state.buffer.lines.len - 1)
-      # Defer expensive full LSP sync to idle time
+      # Rebuild lineIndex to handle trailing newline correctly
+      state.buffer.buildLineIndex()
+      # Defer full LSP sync
       if lspState == lsRunning and state.buffer.filePath.len > 0 and
          state.buffer.lineCount > lspSyncedLines:
         pendingFullLspSync = true
@@ -325,7 +325,7 @@ proc run*(state: var EditorState) =
 
   var needsRedraw = true
   var prevMode = state.mode
-  var prevTopLine = -1
+  var prevTopByte = -1
 
   while state.running:
     # Update viewport dimensions
@@ -347,19 +347,20 @@ proc run*(state: var EditorState) =
       state.viewport.width = size.width - state.sidebar.width - 1
 
     # Adjust viewport to keep cursor visible
-    adjustViewport(state.viewport, state.cursor, state.buffer.lineCount)
+    adjustViewport(state.viewport, state.cursor, state.buffer)
 
     # Request range tokens when viewport scrolls
     if lspHasSemanticTokensRange and lspState == lsRunning and
-       tokenLegend.len > 0 and state.viewport.topLine != prevTopLine:
-      let viewportEnd = min(state.viewport.topLine + state.viewport.height,
+       tokenLegend.len > 0 and state.viewport.topByte != prevTopByte:
+      let curTopLine = state.buffer.byteToLine(state.viewport.topByte)
+      let viewportEnd = min(curTopLine + state.viewport.height,
                             state.buffer.lineCount)
       # Skip if background already highlighted this area
       let bgDone = bgHighlightNextLine < 0 and bgHighlightTotalLines > 0
       if not bgDone or viewportEnd > bgHighlightTotalLines:
         syncLspToLine(state, viewportEnd)
         requestViewportRangeTokens(state)
-      prevTopLine = state.viewport.topLine
+      prevTopByte = state.viewport.topByte
 
     # Render only when something changed
     if needsRedraw:
@@ -410,7 +411,7 @@ proc run*(state: var EditorState) =
         state.viewport.width = sz.width - state.sidebar.width - 1
 
       # Render input result immediately — cursor visible before file events
-      adjustViewport(state.viewport, state.cursor, state.buffer.lineCount)
+      adjustViewport(state.viewport, state.cursor, state.buffer)
       if state.sidebar.visible:
         adjustSidebarScroll(state.sidebar, state.viewport.height)
       render(state)
@@ -421,21 +422,12 @@ proc run*(state: var EditorState) =
     if hadFileEvents:
       needsRedraw = true
 
-    # Incremental LSP sync — join ~50K lines per tick to avoid blocking cursor
+    # Full LSP sync — data is already contiguous, just send it
     if pendingFullLspSync:
-      let endIdx = min(lspSyncIdx + LspSyncChunkSize, state.buffer.lineCount)
-      for i in lspSyncIdx..<endIdx:
-        if lspSyncBuf.len > 0:
-          lspSyncBuf.add('\n')
-        lspSyncBuf.add(state.buffer.lines[i])
-      lspSyncIdx = endIdx
-      if lspSyncIdx >= state.buffer.lineCount:
-        sendDidChange(lspSyncBuf)
-        lspSyncedLines = state.buffer.lineCount
-        lspSyncBuf = ""
-        lspSyncIdx = 0
-        pendingFullLspSync = false
-        needsRedraw = true
+      sendDidChange(state.buffer.data)
+      lspSyncedLines = state.buffer.lineCount
+      pendingFullLspSync = false
+      needsRedraw = true
 
     # Poll LSP events (non-blocking)
     let hadLspEvents = handleLspEvents(state)

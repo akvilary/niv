@@ -94,7 +94,7 @@ proc executeCommand*(state: var EditorState, cmd: ExCommand, arg: string) =
       return
     if arg.len > 0:
       state.buffer.filePath = arg
-    saveFile(path, state.buffer.lines)
+    saveFile(path, state.buffer.data)
     state.buffer.modified = false
     state.statusMessage = "\"" & path & "\" written"
     updateGitDiffStat(state)
@@ -110,7 +110,7 @@ proc executeCommand*(state: var EditorState, cmd: ExCommand, arg: string) =
     if path.len == 0:
       state.statusMessage = "No file name"
       return
-    saveFile(path, state.buffer.lines)
+    saveFile(path, state.buffer.data)
     state.buffer.modified = false
     updateGitDiffStat(state)
     state.running = false
@@ -124,13 +124,12 @@ proc executeCommand*(state: var EditorState, cmd: ExCommand, arg: string) =
       resetViewportRangeCache()
       state.buffer = newBuffer(arg)
       state.cursor = Position(line: 0, col: 0)
-      state.viewport.topLine = 0
+      state.viewport.topByte = 0
       state.viewport.leftCol = 0
       state.statusMessage = "\"" & arg & "\""
       switchLsp(arg)
       if lspState == lsRunning:
-        let text = state.buffer.lines.join("\n")
-        sendDidOpen(arg, text)
+        sendDidOpen(arg, state.buffer.data)
         lspSyncedLines = state.buffer.lineCount
         if tokenLegend.len > 0 and lspHasSemanticTokensRange:
           sendSemanticTokensRange(0, min(state.buffer.lineCount - 1, 50))
@@ -142,12 +141,11 @@ proc executeCommand*(state: var EditorState, cmd: ExCommand, arg: string) =
       resetBgHighlight()
       state.buffer = newBuffer(state.buffer.filePath)
       state.cursor = Position(line: 0, col: 0)
-      state.viewport.topLine = 0
+      state.viewport.topByte = 0
       state.viewport.leftCol = 0
       state.statusMessage = "\"" & state.buffer.filePath & "\" reloaded"
       if lspIsActive():
-        let text = state.buffer.lines.join("\n")
-        sendDidOpen(state.buffer.filePath, text)
+        sendDidOpen(state.buffer.filePath, state.buffer.data)
         lspSyncedLines = state.buffer.lineCount
         if tokenLegend.len > 0 and lspHasSemanticTokensRange:
           sendSemanticTokensRange(0, min(state.buffer.lineCount - 1, 50))

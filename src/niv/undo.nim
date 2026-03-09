@@ -1,4 +1,4 @@
-## Undo/redo history management
+## Undo/redo history management — byte-range operations
 
 import types
 import buffer
@@ -14,28 +14,27 @@ proc commitGroup*(hist: var UndoHistory) =
     hist.current = UndoGroup()
 
 proc undoOne(entry: UndoEntry, buf: var Buffer): Position =
-  result = entry.pos
   case entry.op
-  of uoInsertChar:
-    discard buf.deleteChar(entry.pos)
-    shiftTokensLeft(entry.pos.line, entry.pos.col, 1)
-  of uoDeleteChar:
-    buf.insertChar(entry.pos, entry.text[0])
-    shiftTokensRight(entry.pos.line, entry.pos.col, 1)
-  of uoInsertLine:
-    discard buf.deleteLine(entry.pos.line)
-    deleteSemanticLine(entry.pos.line)
-  of uoDeleteLine:
-    buf.insertLine(entry.pos.line, entry.text)
-    insertSemanticLine(entry.pos.line)
-  of uoReplaceLine:
-    buf.replaceLine(entry.pos.line, entry.text)
-  of uoSplitLine:
-    buf.joinLines(entry.pos.line)
-    joinSemanticLines(entry.pos.line, entry.pos.col)
-  of uoJoinLines:
-    buf.splitLine(entry.pos)
-    splitSemanticLine(entry.pos.line, entry.pos.col)
+  of uoInsert:
+    # Undo insert = delete the inserted bytes
+    let pos = buf.positionOf(entry.offset)
+    buf.deleteBytes(entry.offset, entry.text.len)
+    # Update semantic tokens
+    if entry.text == "\n":
+      joinSemanticLines(pos.line, pos.col)
+    elif entry.text.len == 1:
+      shiftTokensLeft(pos.line, pos.col, 1)
+    result = pos
+  of uoDelete:
+    # Undo delete = re-insert the deleted bytes
+    buf.insertBytes(entry.offset, entry.text)
+    let pos = buf.positionOf(entry.offset)
+    # Update semantic tokens
+    if entry.text == "\n":
+      splitSemanticLine(pos.line, pos.col)
+    elif entry.text.len == 1:
+      shiftTokensRight(pos.line, pos.col, 1)
+    result = pos
 
 proc undo*(hist: var UndoHistory, buf: var Buffer): Position =
   commitGroup(hist)  # commit any pending edits
@@ -48,31 +47,26 @@ proc undo*(hist: var UndoHistory, buf: var Buffer): Position =
     result = undoOne(group.entries[i], buf)
 
 proc redoOne(entry: UndoEntry, buf: var Buffer): Position =
-  result = entry.pos
   case entry.op
-  of uoInsertChar:
-    buf.insertChar(entry.pos, entry.text[0])
-    shiftTokensRight(entry.pos.line, entry.pos.col, 1)
-    result.col += 1
-  of uoDeleteChar:
-    discard buf.deleteChar(entry.pos)
-    shiftTokensLeft(entry.pos.line, entry.pos.col, 1)
-  of uoInsertLine:
-    buf.insertLine(entry.pos.line, entry.text)
-    insertSemanticLine(entry.pos.line)
-  of uoDeleteLine:
-    discard buf.deleteLine(entry.pos.line)
-    deleteSemanticLine(entry.pos.line)
-  of uoReplaceLine:
-    let old = buf.getLine(entry.pos.line)
-    buf.replaceLine(entry.pos.line, entry.lines[0])
-    discard old
-  of uoSplitLine:
-    buf.splitLine(entry.pos)
-    splitSemanticLine(entry.pos.line, entry.pos.col)
-  of uoJoinLines:
-    buf.joinLines(entry.pos.line)
-    joinSemanticLines(entry.pos.line, entry.pos.col)
+  of uoInsert:
+    # Redo insert = re-insert the bytes
+    buf.insertBytes(entry.offset, entry.text)
+    let pos = buf.positionOf(entry.offset + entry.text.len)
+    if entry.text == "\n":
+      splitSemanticLine(pos.line - 1, 0)
+    elif entry.text.len == 1:
+      let insPos = buf.positionOf(entry.offset)
+      shiftTokensRight(insPos.line, insPos.col, 1)
+    result = pos
+  of uoDelete:
+    # Redo delete = delete again
+    let pos = buf.positionOf(entry.offset)
+    buf.deleteBytes(entry.offset, entry.text.len)
+    if entry.text == "\n":
+      joinSemanticLines(pos.line, pos.col)
+    elif entry.text.len == 1:
+      shiftTokensLeft(pos.line, pos.col, 1)
+    result = pos
 
 proc redo*(hist: var UndoHistory, buf: var Buffer): Position =
   if hist.redoStack.len == 0:

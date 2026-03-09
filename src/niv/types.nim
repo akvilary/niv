@@ -37,19 +37,13 @@ type
     col*: int       # 0-indexed byte offset
 
   UndoOp* = enum
-    uoInsertChar
-    uoDeleteChar
-    uoInsertLine
-    uoDeleteLine
-    uoReplaceLine
-    uoSplitLine
-    uoJoinLines
+    uoInsert
+    uoDelete
 
   UndoEntry* = object
     op*: UndoOp
-    pos*: Position
-    text*: string
-    lines*: seq[string]
+    offset*: int       ## byte offset in data
+    text*: string      ## inserted/deleted bytes
 
   UndoGroup* = object
     entries*: seq[UndoEntry]
@@ -60,7 +54,8 @@ type
     current*: UndoGroup
 
   Buffer* = object
-    lines*: seq[string]
+    data*: string            ## Raw file bytes (newlines preserved)
+    lineIndex*: seq[int]     ## Byte offset of each line start
     filePath*: string
     modified*: bool
     undo*: UndoHistory
@@ -71,7 +66,7 @@ type
     estimatedTotalLines*: int ## Estimated from first chunk
 
   Viewport* = object
-    topLine*: int
+    topByte*: int   ## Byte offset of first visible line
     leftCol*: int
     height*: int    # usable rows for text
     width*: int     # total terminal width
@@ -128,7 +123,7 @@ type
     inCommitInput*: bool
     savedBuffer*: Buffer
     savedCursor*: Position
-    savedTopLine*: int
+    savedTopByte*: int
     confirmDiscard*: bool
 
   SearchMatch* = object
@@ -143,7 +138,7 @@ type
     commandLine*: string
     statusMessage*: string
     running*: bool
-    yankRegister*: seq[string]
+    yankRegister*: string
     yankIsLinewise*: bool
     pendingKeys*: string
     sidebar*: SidebarState

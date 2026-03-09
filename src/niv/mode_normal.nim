@@ -1,6 +1,5 @@
 ## Normal mode key handler
 
-import std/strutils
 import types
 import buffer
 import cursor
@@ -118,7 +117,6 @@ proc handleNormalMode*(state: var EditorState, key: InputKey) =
     state.mode = mInsert
   of akInsertLineBelow:
     let lineNum = state.cursor.line
-    # Auto-indent: use next line's indent only if it's deeper than current
     let curIndent = state.buffer.getIndent(lineNum)
     let nextLine = lineNum + 1
     var indent = curIndent
@@ -126,10 +124,15 @@ proc handleNormalMode*(state: var EditorState, key: InputKey) =
       let nextIndent = state.buffer.getIndent(nextLine)
       if nextIndent.len > curIndent.len:
         indent = nextIndent
+    let insertText = indent & "\n"
+    let insertOffset = if lineNum + 1 < state.buffer.lineIndex.len:
+      state.buffer.lineIndex[lineNum + 1]
+    else:
+      state.buffer.data.len
     state.buffer.undo.pushUndo(UndoEntry(
-      op: uoInsertLine,
-      pos: Position(line: lineNum + 1, col: 0),
-      text: indent,
+      op: uoInsert,
+      offset: insertOffset,
+      text: insertText,
     ))
     state.buffer.undo.commitGroup()
     state.buffer.insertLine(lineNum + 1, indent)
@@ -138,16 +141,17 @@ proc handleNormalMode*(state: var EditorState, key: InputKey) =
     state.mode = mInsert
   of akInsertLineAbove:
     let lineNum = state.cursor.line
-    # Auto-indent: try next line (current before shift), then line above
     var indent = ""
     if state.buffer.lineLen(lineNum) > 0:
       indent = state.buffer.getIndent(lineNum)
     elif lineNum > 0 and state.buffer.lineLen(lineNum - 1) > 0:
       indent = state.buffer.getIndent(lineNum - 1)
+    let insertText = indent & "\n"
+    let insertOffset = state.buffer.lineIndex[lineNum]
     state.buffer.undo.pushUndo(UndoEntry(
-      op: uoInsertLine,
-      pos: Position(line: lineNum, col: 0),
-      text: indent,
+      op: uoInsert,
+      offset: insertOffset,
+      text: insertText,
     ))
     state.buffer.undo.commitGroup()
     state.buffer.insertLine(lineNum, indent)
@@ -158,32 +162,41 @@ proc handleNormalMode*(state: var EditorState, key: InputKey) =
   # Editing
   of akDeleteChar:
     if state.buffer.lineLen(state.cursor.line) > 0:
+      let delOffset = state.buffer.byteOffsetOf(state.cursor)
       let ch = state.buffer.deleteChar(state.cursor)
       state.buffer.undo.pushUndo(UndoEntry(
-        op: uoDeleteChar,
-        pos: state.cursor,
+        op: uoDelete,
+        offset: delOffset,
         text: $ch,
       ))
       state.buffer.undo.commitGroup()
       state.cursor = clampCursor(state.buffer, state.cursor, mNormal)
 
   of akDeleteLine:
-    let lineText = state.buffer.getLine(state.cursor.line)
-    state.yankRegister = @[lineText]
+    let lineNum = state.cursor.line
+    let lineText = state.buffer.getLine(lineNum)
+    state.yankRegister = lineText
     state.yankIsLinewise = true
+    # Include the \n in deleted bytes
+    let s = state.buffer.lineIndex[lineNum]
+    let e = if lineNum + 1 < state.buffer.lineIndex.len:
+      state.buffer.lineIndex[lineNum + 1]
+    else:
+      state.buffer.data.len
+    let deletedText = state.buffer.data[s..<e]
     state.buffer.undo.pushUndo(UndoEntry(
-      op: uoDeleteLine,
-      pos: Position(line: state.cursor.line, col: 0),
-      text: lineText,
+      op: uoDelete,
+      offset: s,
+      text: deletedText,
     ))
     state.buffer.undo.commitGroup()
-    discard state.buffer.deleteLine(state.cursor.line)
-    deleteSemanticLine(state.cursor.line)
+    discard state.buffer.deleteLine(lineNum)
+    deleteSemanticLine(lineNum)
     state.cursor = clampCursor(state.buffer, state.cursor, mNormal)
 
   of akYankLine:
     let lineText = state.buffer.getLine(state.cursor.line)
-    state.yankRegister = @[lineText]
+    state.yankRegister = lineText
     state.yankIsLinewise = true
     state.statusMessage = "1 line yanked"
 
@@ -191,11 +204,16 @@ proc handleNormalMode*(state: var EditorState, key: InputKey) =
     if state.yankRegister.len > 0:
       if state.yankIsLinewise:
         let lineNum = state.cursor.line + 1
-        let text = state.yankRegister[0]
+        let text = state.yankRegister
+        let insertText = text & "\n"
+        let insertOffset = if lineNum < state.buffer.lineIndex.len:
+          state.buffer.lineIndex[lineNum]
+        else:
+          state.buffer.data.len
         state.buffer.undo.pushUndo(UndoEntry(
-          op: uoInsertLine,
-          pos: Position(line: lineNum, col: 0),
-          text: text,
+          op: uoInsert,
+          offset: insertOffset,
+          text: insertText,
         ))
         state.buffer.undo.commitGroup()
         state.buffer.insertLine(lineNum, text)
@@ -206,11 +224,13 @@ proc handleNormalMode*(state: var EditorState, key: InputKey) =
     if state.yankRegister.len > 0:
       if state.yankIsLinewise:
         let lineNum = state.cursor.line
-        let text = state.yankRegister[0]
+        let text = state.yankRegister
+        let insertText = text & "\n"
+        let insertOffset = state.buffer.lineIndex[lineNum]
         state.buffer.undo.pushUndo(UndoEntry(
-          op: uoInsertLine,
-          pos: Position(line: lineNum, col: 0),
-          text: text,
+          op: uoInsert,
+          offset: insertOffset,
+          text: insertText,
         ))
         state.buffer.undo.commitGroup()
         state.buffer.insertLine(lineNum, text)
@@ -243,14 +263,13 @@ proc handleNormalMode*(state: var EditorState, key: InputKey) =
         state.buffer = newBuffer(jump.filePath)
         switchLsp(jump.filePath)
         if lspState == lsRunning:
-          let text = state.buffer.lines.join("\n")
-          sendDidOpen(jump.filePath, text)
+          sendDidOpen(jump.filePath, state.buffer.data)
           lspSyncedLines = state.buffer.lineCount
           if lspHasSemanticTokensRange and tokenLegend.len > 0:
             sendSemanticTokensRange(0, min(state.buffer.lineCount - 1, 50))
             startBgHighlight(state.buffer.lineCount)
       state.cursor = jump.cursor
-      state.viewport.topLine = jump.topLine
+      state.viewport.topByte = jump.topByte
       state.viewport.leftCol = 0
     else:
       state.statusMessage = "No previous location"

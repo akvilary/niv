@@ -196,7 +196,7 @@ proc renderGitCommitEditor(state: EditorState, startRow, panelHeight, totalWidth
     setThemeColors()
     clearLine()
 
-    let lineNum = state.viewport.topLine + row
+    let lineNum = state.buffer.byteToLine(state.viewport.topByte) + row
     if lineNum < state.buffer.lineCount:
       let numStr = $(lineNum + 1)
       let padding = lnWidth - numStr.len - 1
@@ -204,7 +204,7 @@ proc renderGitCommitEditor(state: EditorState, startRow, panelHeight, totalWidth
       stdout.write(spaces(padding) & numStr & " ")
       setThemeFg()
 
-      let line = state.buffer.lines[lineNum]
+      let line = state.buffer.getLine(lineNum)
       let startCol = state.viewport.leftCol
       if startCol < line.len:
         let endCol = min(startCol + textWidth, line.len)
@@ -534,7 +534,10 @@ proc render*(state: EditorState) =
 
   # Choose which buffer to render in the editor area
   let renderBuffer = if inCommit: state.gitPanel.savedBuffer else: state.buffer
-  let renderTopLine = if inCommit: state.gitPanel.savedTopLine else: state.viewport.topLine
+  let vpTopLine = state.buffer.byteToLine(state.viewport.topByte)
+  let renderTopLine = if inCommit:
+    state.gitPanel.savedBuffer.byteToLine(state.gitPanel.savedTopByte)
+  else: vpTopLine
   let renderLeftCol = if inCommit: 0 else: state.viewport.leftCol
 
   let lnWidth = lineNumberWidth(renderBuffer.lineCount)
@@ -580,7 +583,7 @@ proc render*(state: EditorState) =
       stdout.write(spaces(padding) & numStr & " ")
       setThemeFg()
 
-      let line = renderBuffer.lines[lineNum]
+      let line = renderBuffer.getLine(lineNum)
       let startCol = renderLeftCol
       if startCol < line.len:
         let endCol = min(startCol + textWidth, line.len)
@@ -711,7 +714,7 @@ proc render*(state: EditorState) =
   if completionState.active and completionState.items.len > 0 and state.mode == mInsert:
     let maxItems = min(10, completionState.items.len)
     let maxWidth = 40
-    let screenRow = state.cursor.line - state.viewport.topLine + 2  # one row below cursor
+    let screenRow = state.cursor.line - vpTopLine + 2  # one row below cursor
     let screenCol = completionState.triggerCol - state.viewport.leftCol + lnWidth + colOffset + 1
 
     for i in 0..<maxItems:
@@ -742,7 +745,7 @@ proc render*(state: EditorState) =
     # Place cursor in the git panel commit editor area
     let commitLnWidth = lineNumberWidth(state.buffer.lineCount)
     let panelStartRow = editorRows + 1  # separator row
-    let screenRow = panelStartRow + 1 + (state.cursor.line - state.viewport.topLine)
+    let screenRow = panelStartRow + 1 + (state.cursor.line - vpTopLine)
     let screenCol = state.cursor.col - state.viewport.leftCol + commitLnWidth + 1
     moveCursor(screenRow, screenCol)
     if state.mode == mInsert: setCursorBlinkingBar() else: setCursorBlock()
@@ -753,7 +756,7 @@ proc render*(state: EditorState) =
     setCursorBlinkingBar()
     showCursor()
   else:
-    let screenRow = state.cursor.line - state.viewport.topLine + 1
+    let screenRow = state.cursor.line - vpTopLine + 1
     let screenCol = state.cursor.col - state.viewport.leftCol + lnWidth + colOffset + 1
     moveCursor(screenRow, screenCol)
     if state.mode == mInsert: setCursorBlinkingBar() else: setCursorBlock()

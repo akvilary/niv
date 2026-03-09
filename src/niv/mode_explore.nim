@@ -1,6 +1,5 @@
 ## Explore mode (sidebar focused) key handler
 
-import std/strutils
 import types
 import buffer
 import sidebar
@@ -16,7 +15,7 @@ proc openFileFromSidebar(state: var EditorState, filePath: string) =
 
   state.buffer = newBuffer(filePath)
   state.cursor = Position(line: 0, col: 0)
-  state.viewport.topLine = 0
+  state.viewport.topByte = 0
   state.viewport.leftCol = 0
   state.sidebar.focused = false
   state.mode = mNormal
@@ -24,8 +23,7 @@ proc openFileFromSidebar(state: var EditorState, filePath: string) =
 
   switchLsp(filePath)
   if lspState == lsRunning:
-    let text = state.buffer.lines.join("\n")
-    sendDidOpen(filePath, text)
+    sendDidOpen(filePath, state.buffer.data)
     lspSyncedLines = state.buffer.lineCount
     if tokenLegend.len > 0 and lspHasSemanticTokensRange:
       sendSemanticTokensRange(0, min(state.buffer.lineCount - 1, 50))

@@ -1,6 +1,5 @@
 ## Insert mode key handler
 
-import std/strutils
 import types
 import buffer
 import cursor
@@ -24,16 +23,16 @@ proc acceptCompletion(state: var EditorState) =
       state.cursor.col -= 1
       let ch = state.buffer.deleteChar(state.cursor)
       state.buffer.undo.pushUndo(UndoEntry(
-        op: uoDeleteChar,
-        pos: state.cursor,
+        op: uoDelete,
+        offset: state.buffer.byteOffsetOf(state.cursor),
         text: $ch,
       ))
 
   # Insert the completion text
   for ch in insertText:
     state.buffer.undo.pushUndo(UndoEntry(
-      op: uoInsertChar,
-      pos: state.cursor,
+      op: uoInsert,
+      offset: state.buffer.byteOffsetOf(state.cursor),
       text: $ch,
     ))
     state.buffer.insertChar(state.cursor, ch)
@@ -50,7 +49,7 @@ proc sendEditUpdate(state: EditorState, startLine, endLine: int) =
   ## Send didChange + request range tokens for edited lines
   if lspState != lsRunning or state.buffer.filePath.len == 0:
     return
-  sendDidChange(state.buffer.lines.join("\n"))
+  sendDidChange(state.buffer.data)
   lspSyncedLines = state.buffer.lineCount
   resetViewportRangeCache()
   if tokenLegend.len > 0 and lspHasSemanticTokensRange:
@@ -67,15 +66,15 @@ proc handleInsertMode*(state: var EditorState, key: InputKey) =
     state.cursor = clampCursor(state.buffer, state.cursor, mNormal)
     # Final LSP sync
     if lspIsActive() and state.buffer.filePath.len > 0:
-      sendDidChange(state.buffer.lines.join("\n"))
+      sendDidChange(state.buffer.data)
       lspSyncedLines = state.buffer.lineCount
 
   of kkChar:
     if completionState.active:
       closeCompletion()
     state.buffer.undo.pushUndo(UndoEntry(
-      op: uoInsertChar,
-      pos: state.cursor,
+      op: uoInsert,
+      offset: state.buffer.byteOffsetOf(state.cursor),
       text: $key.ch,
     ))
     state.buffer.insertChar(state.cursor, key.ch)
@@ -90,19 +89,21 @@ proc handleInsertMode*(state: var EditorState, key: InputKey) =
     else:
       let splitCol = state.cursor.col
       let indent = state.buffer.getIndent(state.cursor.line)
+      let insertText = "\n" & indent
       state.buffer.undo.pushUndo(UndoEntry(
-        op: uoSplitLine,
-        pos: state.cursor,
+        op: uoInsert,
+        offset: state.buffer.byteOffsetOf(state.cursor),
+        text: insertText,
       ))
       state.buffer.splitLine(state.cursor)
       state.cursor.line += 1
       state.cursor.col = 0
       # Split semantic tokens at the split point
       splitSemanticLine(state.cursor.line - 1, splitCol)
-      # Auto-indent: prepend indentation to the new line
+      # Auto-indent: insert indentation at start of new line
       if indent.len > 0:
-        let newLine = indent & state.buffer.getLine(state.cursor.line)
-        state.buffer.lines[state.cursor.line] = newLine
+        for i, ch in indent:
+          state.buffer.insertChar(Position(line: state.cursor.line, col: i), ch)
         state.cursor.col = indent.len
       sendEditUpdate(state, state.cursor.line - 1, state.cursor.line)
 
@@ -113,8 +114,8 @@ proc handleInsertMode*(state: var EditorState, key: InputKey) =
       state.cursor.col -= 1
       let ch = state.buffer.deleteChar(state.cursor)
       state.buffer.undo.pushUndo(UndoEntry(
-        op: uoDeleteChar,
-        pos: state.cursor,
+        op: uoDelete,
+        offset: state.buffer.byteOffsetOf(state.cursor),
         text: $ch,
       ))
       # Shift tokens left from deletion point
@@ -123,9 +124,11 @@ proc handleInsertMode*(state: var EditorState, key: InputKey) =
     elif state.cursor.line > 0:
       # Join with previous line
       let prevLineLen = state.buffer.lineLen(state.cursor.line - 1)
+      let joinOffset = state.buffer.byteOffsetOf(Position(line: state.cursor.line - 1, col: prevLineLen))
       state.buffer.undo.pushUndo(UndoEntry(
-        op: uoJoinLines,
-        pos: Position(line: state.cursor.line - 1, col: prevLineLen),
+        op: uoDelete,
+        offset: joinOffset,
+        text: "\n",
       ))
       state.buffer.joinLines(state.cursor.line - 1)
       state.cursor.line -= 1
@@ -138,10 +141,11 @@ proc handleInsertMode*(state: var EditorState, key: InputKey) =
     if completionState.active:
       closeCompletion()
     if state.cursor.col < state.buffer.lineLen(state.cursor.line):
+      let delOffset = state.buffer.byteOffsetOf(state.cursor)
       let ch = state.buffer.deleteChar(state.cursor)
       state.buffer.undo.pushUndo(UndoEntry(
-        op: uoDeleteChar,
-        pos: state.cursor,
+        op: uoDelete,
+        offset: delOffset,
         text: $ch,
       ))
       # Shift tokens left from deletion point
@@ -149,9 +153,11 @@ proc handleInsertMode*(state: var EditorState, key: InputKey) =
       sendEditUpdate(state, state.cursor.line, state.cursor.line)
     elif state.cursor.line < state.buffer.lastLine:
       let joinCol = state.buffer.lineLen(state.cursor.line)
+      let joinOffset = state.buffer.byteOffsetOf(Position(line: state.cursor.line, col: joinCol))
       state.buffer.undo.pushUndo(UndoEntry(
-        op: uoJoinLines,
-        pos: state.cursor,
+        op: uoDelete,
+        offset: joinOffset,
+        text: "\n",
       ))
       state.buffer.joinLines(state.cursor.line)
       # Merge semantic tokens from joined line
@@ -165,8 +171,8 @@ proc handleInsertMode*(state: var EditorState, key: InputKey) =
       let tabSize = if activeLspLanguageId == "python": 4 else: 2
       for _ in 0..<tabSize:
         state.buffer.undo.pushUndo(UndoEntry(
-          op: uoInsertChar,
-          pos: state.cursor,
+          op: uoInsert,
+          offset: state.buffer.byteOffsetOf(state.cursor),
           text: " ",
         ))
         state.buffer.insertChar(state.cursor, ' ')
@@ -201,7 +207,7 @@ proc handleInsertMode*(state: var EditorState, key: InputKey) =
       # Ctrl-Space: trigger completion
       if lspState == lsRunning and lspDocumentUri.len > 0:
         # Send latest text first
-        sendDidChange(state.buffer.lines.join("\n"))
+        sendDidChange(state.buffer.data)
         # Send completion request
         let id = nextLspId()
         sendToLsp(buildCompletion(id, lspDocumentUri, state.cursor.line, state.cursor.col))
