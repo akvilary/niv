@@ -1,5 +1,7 @@
 ## All shared types for nimvim
 
+import std/unicode
+
 type
   KeyKind* = enum
     kkNone
@@ -21,8 +23,8 @@ type
 
   InputKey* = object
     kind*: KeyKind
-    ch*: char       # for kkChar
-    ctrl*: char     # for kkCtrlKey (e.g. 'c' for Ctrl-C)
+    ch*: Rune       # for kkChar (Unicode code point)
+    ctrl*: Rune     # for kkCtrlKey (e.g. 'c' for Ctrl-C)
 
   Mode* = enum
     mNormal
@@ -95,8 +97,8 @@ type
 
   GitFileStatus* = object
     path*: string
-    indexStatus*: char
-    workTreeStatus*: char
+    indexStatus*: Rune
+    workTreeStatus*: Rune
 
   GitLogEntry* = object
     hash*: string
@@ -153,11 +155,11 @@ type
 proc noKey*(): InputKey =
   InputKey(kind: kkNone)
 
-proc charKey*(c: char): InputKey =
-  InputKey(kind: kkChar, ch: c)
+proc charKey*(r: Rune): InputKey =
+  InputKey(kind: kkChar, ch: r)
 
-proc ctrlKey*(c: char): InputKey =
-  InputKey(kind: kkCtrlKey, ctrl: c)
+proc ctrlKey*(r: Rune): InputKey =
+  InputKey(kind: kkCtrlKey, ctrl: r)
 
 proc specialKey*(kind: KeyKind): InputKey =
   InputKey(kind: kind)

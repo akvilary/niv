@@ -71,7 +71,11 @@ proc handleCommandMode*(state: var EditorState, key: InputKey) =
 
   of kkBackspace:
     if state.commandLine.len > 0:
-      state.commandLine.setLen(state.commandLine.len - 1)
+      # Delete last rune (may be multi-byte)
+      var i = state.commandLine.len - 1
+      while i > 0 and (ord(state.commandLine[i]) and 0xC0) == 0x80:
+        dec i
+      state.commandLine.setLen(i)
     else:
       if state.searchInput:
         state.searchQuery = ""
@@ -81,7 +85,7 @@ proc handleCommandMode*(state: var EditorState, key: InputKey) =
       state.mode = mNormal
 
   of kkChar:
-    state.commandLine.add(key.ch)
+    state.commandLine.add($key.ch)
 
   else:
     discard

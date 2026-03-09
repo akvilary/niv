@@ -1,6 +1,6 @@
 ## Text buffer: raw bytes with line offset index
 
-import std/strutils
+import std/[strutils, unicode]
 import types
 import fileio
 
@@ -121,32 +121,31 @@ proc shiftLineIndex(buf: var Buffer, fromLine: int, delta: int) =
 # Edit operations
 # ---------------------------------------------------------------------------
 
-proc insertChar*(buf: var Buffer, pos: Position, ch: char) =
+proc insertRune*(buf: var Buffer, pos: Position, r: Rune) =
   if pos.line >= 0 and pos.line < buf.lineIndex.len:
+    let text = $r
     let byteOff = buf.lineIndex[pos.line] + clamp(pos.col, 0, buf.lineLen(pos.line))
-    buf.data.insert($ch, byteOff)
+    buf.data.insert(text, byteOff)
     buf.modified = true
-    # If inserting \n, add new line entry
-    if ch == '\n':
-      buf.lineIndex.insert(byteOff + 1, pos.line + 1)
-      buf.shiftLineIndex(pos.line + 2, 1)
-    else:
-      buf.shiftLineIndex(pos.line + 1, 1)
+    buf.shiftLineIndex(pos.line + 1, text.len)
 
-proc deleteChar*(buf: var Buffer, pos: Position): char =
+proc deleteRune*(buf: var Buffer, pos: Position): string =
   if pos.line >= 0 and pos.line < buf.lineIndex.len:
     let byteOff = buf.lineIndex[pos.line] + pos.col
     if byteOff < buf.data.len:
-      result = buf.data[byteOff]
-      buf.data.delete(byteOff..byteOff)
-      buf.modified = true
-      if result == '\n':
-        # Merging two lines: remove lineIndex entry for next line
+      if buf.data[byteOff] == '\n':
+        result = "\n"
+        buf.data.delete(byteOff..byteOff)
+        buf.modified = true
         if pos.line + 1 < buf.lineIndex.len:
           buf.lineIndex.delete(pos.line + 1)
         buf.shiftLineIndex(pos.line + 1, -1)
       else:
-        buf.shiftLineIndex(pos.line + 1, -1)
+        let rl = runeLenAt(buf.data, byteOff)
+        result = buf.data[byteOff..<byteOff + rl]
+        buf.data.delete(byteOff..<byteOff + rl)
+        buf.modified = true
+        buf.shiftLineIndex(pos.line + 1, -rl)
 
 proc insertLine*(buf: var Buffer, lineNum: int, text: string = "") =
   let ln = clamp(lineNum, 0, buf.lineIndex.len)

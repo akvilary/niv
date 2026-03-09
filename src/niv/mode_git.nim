@@ -1,6 +1,6 @@
 ## Git mode key handler
 
-import std/strutils
+import std/[strutils, unicode]
 import types
 import buffer
 import git
@@ -65,16 +65,16 @@ proc handleFilesView(state: var EditorState, key: InputKey) =
 
   of kkChar:
     case key.ch
-    of 'q':
+    of Rune(ord('q')):
       closeGitPanel(state.gitPanel)
       state.mode = mNormal
-    of 'j':
+    of Rune(ord('j')):
       if state.gitPanel.files.len > 0 and state.gitPanel.cursorIndex < state.gitPanel.files.len - 1:
         inc state.gitPanel.cursorIndex
-    of 'k':
+    of Rune(ord('k')):
       if state.gitPanel.cursorIndex > 0:
         dec state.gitPanel.cursorIndex
-    of 's':
+    of Rune(ord('s')):
       if state.gitPanel.cursorIndex < state.gitPanel.files.len:
         let f = state.gitPanel.files[state.gitPanel.cursorIndex]
         if f.isStaged:
@@ -83,20 +83,20 @@ proc handleFilesView(state: var EditorState, key: InputKey) =
         else:
           if gitStage(f.path):
             refreshGitFiles(state.gitPanel)
-    of 'd':
+    of Rune(ord('d')):
       if state.gitPanel.cursorIndex < state.gitPanel.files.len:
         let f = state.gitPanel.files[state.gitPanel.cursorIndex]
         if not f.isStaged:
           state.gitPanel.confirmDiscard = true
           state.statusMessage = "Discard changes to " & f.path & "? (y/n)"
-    of 'c':
+    of Rune(ord('c')):
       enterCommitInput(state)
-    of 'l':
+    of Rune(ord('l')):
       state.gitPanel.logEntries = gitLog()
       state.gitPanel.logCursorIndex = 0
       state.gitPanel.logScrollOffset = 0
       state.gitPanel.view = gvLog
-    of 'r':
+    of Rune(ord('r')):
       refreshGitFiles(state.gitPanel)
     else:
       discard
@@ -134,12 +134,12 @@ proc handleDiffView(state: var EditorState, key: InputKey) =
 
   of kkChar:
     case key.ch
-    of 'q':
+    of Rune(ord('q')):
       state.gitPanel.view = state.gitPanel.diffReturnView
-    of 'j':
+    of Rune(ord('j')):
       if state.gitPanel.diffScrollOffset < max(0, state.gitPanel.diffLines.len - 1):
         inc state.gitPanel.diffScrollOffset
-    of 'k':
+    of Rune(ord('k')):
       if state.gitPanel.diffScrollOffset > 0:
         dec state.gitPanel.diffScrollOffset
     else:
@@ -164,12 +164,12 @@ proc handleLogView(state: var EditorState, key: InputKey) =
 
   of kkChar:
     case key.ch
-    of 'q':
+    of Rune(ord('q')):
       state.gitPanel.view = gvFiles
-    of 'j':
+    of Rune(ord('j')):
       if state.gitPanel.logEntries.len > 0 and state.gitPanel.logCursorIndex < state.gitPanel.logEntries.len - 1:
         inc state.gitPanel.logCursorIndex
-    of 'k':
+    of Rune(ord('k')):
       if state.gitPanel.logCursorIndex > 0:
         dec state.gitPanel.logCursorIndex
     else:
@@ -199,7 +199,7 @@ proc handleGitMode*(state: var EditorState, key: InputKey) =
   if state.gitPanel.confirmDiscard:
     case key.kind
     of kkChar:
-      if key.ch == 'y':
+      if key.ch == Rune(ord('y')):
         if state.gitPanel.cursorIndex < state.gitPanel.files.len:
           let f = state.gitPanel.files[state.gitPanel.cursorIndex]
           if gitDiscard(f.path, f.isUntracked):

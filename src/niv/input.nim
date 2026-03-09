@@ -1,6 +1,6 @@
 ## Multi-key sequence parsing for Normal mode
 
-import std/strutils
+import std/[strutils, unicode]
 import types
 
 type
@@ -82,12 +82,13 @@ proc processNormalKey*(pending: var string, key: InputKey): InputResult =
   of kkCtrlKey:
     pending = ""
     case key.ctrl
-    of 'r':
+    of Rune(ord('r')):
       return InputResult(complete: true, action: akRedo)
     else:
       return InputResult(complete: false, action: akNone)
   of kkChar:
-    pending.add(key.ch)
+    # Normal mode keys are ASCII — append UTF-8 representation to pending
+    pending.add($key.ch)
   of kkDelete:
     pending = ""
     return InputResult(complete: true, action: akDeleteChar)

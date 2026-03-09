@@ -1,6 +1,6 @@
 ## Git integration: status, staging, diff, commit, log
 
-import std/[strutils, osproc]
+import std/[strutils, osproc, unicode]
 import types
 
 proc gitGetStatus*(): seq[GitFileStatus] =
@@ -11,8 +11,8 @@ proc gitGetStatus*(): seq[GitFileStatus] =
     for line in output.splitLines():
       if line.len < 3:
         continue
-      let indexSt = line[0]
-      let workSt = line[1]
+      let indexSt = Rune(ord(line[0]))
+      let workSt = Rune(ord(line[1]))
       let path = line[3..^1]
       result.add(GitFileStatus(
         path: path,
@@ -132,14 +132,14 @@ proc refreshGitFiles*(panel: var GitPanelState) =
     panel.cursorIndex = max(0, panel.files.len - 1)
 
 proc isStaged*(f: GitFileStatus): bool =
-  f.indexStatus != ' ' and f.indexStatus != '?'
+  f.indexStatus != Rune(ord(' ')) and f.indexStatus != Rune(ord('?'))
 
 proc isUntracked*(f: GitFileStatus): bool =
-  f.indexStatus == '?' and f.workTreeStatus == '?'
+  f.indexStatus == Rune(ord('?')) and f.workTreeStatus == Rune(ord('?'))
 
-proc statusChar*(f: GitFileStatus): char =
+proc statusChar*(f: GitFileStatus): Rune =
   if f.isStaged:
     return f.indexStatus
   if f.isUntracked:
-    return '?'
+    return Rune(ord('?'))
   return f.workTreeStatus

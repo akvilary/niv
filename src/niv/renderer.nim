@@ -1,6 +1,6 @@
 ## Screen rendering pipeline
 
-import std/[strutils, os]
+import std/[strutils, os, unicode]
 import types
 import buffer
 import terminal
@@ -257,13 +257,13 @@ proc renderGitPanel(state: EditorState, startRow, panelHeight, totalWidth: int) 
       displayLines.add((" Staged (" & $stagedFiles.len & "):", true, -1))
       for idx in stagedFiles:
         let f = gp.files[idx]
-        displayLines.add(("   " & f.statusChar & "  " & f.path, false, idx))
+        displayLines.add(("   " & $f.statusChar & "  " & f.path, false, idx))
 
     if unstagedFiles.len > 0:
       displayLines.add((" Changes (" & $unstagedFiles.len & "):", true, -1))
       for idx in unstagedFiles:
         let f = gp.files[idx]
-        displayLines.add(("   " & f.statusChar & "  " & f.path, false, idx))
+        displayLines.add(("   " & $f.statusChar & "  " & f.path, false, idx))
 
     if displayLines.len == 0:
       displayLines.add((" No changes", true, -1))

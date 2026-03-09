@@ -1,5 +1,6 @@
 ## LSP Manager mode key handler
 
+import std/unicode
 import types
 import lsp_manager
 import lsp_client
@@ -19,15 +20,15 @@ proc handleLspManagerMode*(state: var EditorState, key: InputKey) =
 
   of kkChar:
     case key.ch
-    of 'q':
+    of Rune(ord('q')):
       closeLspManagerAndTryStart(state)
-    of 'j':
+    of Rune(ord('j')):
       managerMoveDown()
-    of 'k':
+    of Rune(ord('k')):
       managerMoveUp()
-    of 'i':
+    of Rune(ord('i')):
       startInstall()
-    of 'X':
+    of Rune(ord('X')):
       startUninstall()
     else:
       discard

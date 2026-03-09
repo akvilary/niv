@@ -1,5 +1,6 @@
 ## Explore mode (sidebar focused) key handler
 
+import std/unicode
 import types
 import buffer
 import sidebar
@@ -43,19 +44,19 @@ proc handleExploreMode*(state: var EditorState, key: InputKey) =
 
   of kkChar:
     case key.ch
-    of 'j':
+    of Rune(ord('j')):
       sidebarMoveDown(state.sidebar)
-    of 'k':
+    of Rune(ord('k')):
       sidebarMoveUp(state.sidebar)
-    of 'l':
+    of Rune(ord('l')):
       let filePath = sidebarExpandOrOpen(state.sidebar)
       if filePath.len > 0:
         openFileFromSidebar(state, filePath)
-    of 'h':
+    of Rune(ord('h')):
       sidebarCollapse(state.sidebar)
-    of '-':
+    of Rune(ord('-')):
       sidebarCollapse(state.sidebar)
-    of 'q':
+    of Rune(ord('q')):
       state.sidebar.visible = false
       state.sidebar.focused = false
       state.mode = mNormal
@@ -74,10 +75,10 @@ proc handleExploreMode*(state: var EditorState, key: InputKey) =
 
   of kkCtrlKey:
     case key.ctrl
-    of 'w':
+    of Rune(ord('w')):
       state.sidebar.focused = false
       state.mode = mNormal
-    of 'e':
+    of Rune(ord('e')):
       toggleSidebar(state.sidebar)
       if not state.sidebar.visible:
         state.sidebar.focused = false

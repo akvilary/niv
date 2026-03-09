@@ -1,5 +1,6 @@
 ## Insert mode key handler
 
+import std/unicode
 import types
 import buffer
 import cursor
@@ -17,26 +18,26 @@ proc acceptCompletion(state: var EditorState) =
   let insertText = if item.insertText.len > 0: item.insertText else: item.label
 
   # Delete from triggerCol to cursor.col (the partial typed text)
-  let deleteCount = state.cursor.col - completionState.triggerCol
-  if deleteCount > 0:
-    for i in 0..<deleteCount:
-      state.cursor.col -= 1
-      let ch = state.buffer.deleteChar(state.cursor)
-      state.buffer.undo.pushUndo(UndoEntry(
-        op: uoDelete,
-        offset: state.buffer.byteOffsetOf(state.cursor),
-        text: $ch,
-      ))
+  while state.cursor.col > completionState.triggerCol:
+    let line = state.buffer.getLine(state.cursor.line)
+    state.cursor.col = prevRuneStart(line, state.cursor.col)
+    let deleted = state.buffer.deleteRune(state.cursor)
+    state.buffer.undo.pushUndo(UndoEntry(
+      op: uoDelete,
+      offset: state.buffer.byteOffsetOf(state.cursor),
+      text: deleted,
+    ))
 
   # Insert the completion text
-  for ch in insertText:
+  for r in insertText.runes:
+    let text = $r
     state.buffer.undo.pushUndo(UndoEntry(
       op: uoInsert,
       offset: state.buffer.byteOffsetOf(state.cursor),
-      text: $ch,
+      text: text,
     ))
-    state.buffer.insertChar(state.cursor, ch)
-    state.cursor.col += 1
+    state.buffer.insertRune(state.cursor, r)
+    state.cursor.col += text.len
 
   completionState.active = false
   completionState.items = @[]
@@ -72,15 +73,16 @@ proc handleInsertMode*(state: var EditorState, key: InputKey) =
   of kkChar:
     if completionState.active:
       closeCompletion()
+    let text = $key.ch
     state.buffer.undo.pushUndo(UndoEntry(
       op: uoInsert,
       offset: state.buffer.byteOffsetOf(state.cursor),
-      text: $key.ch,
+      text: text,
     ))
-    state.buffer.insertChar(state.cursor, key.ch)
-    state.cursor.col += 1
+    state.buffer.insertRune(state.cursor, key.ch)
+    state.cursor.col += text.len
     # Shift tokens right from insertion point
-    shiftTokensRight(state.cursor.line, state.cursor.col - 1, 1)
+    shiftTokensRight(state.cursor.line, state.cursor.col - text.len, text.len)
     sendEditUpdate(state, state.cursor.line, state.cursor.line)
 
   of kkEnter:
@@ -102,24 +104,25 @@ proc handleInsertMode*(state: var EditorState, key: InputKey) =
       splitSemanticLine(state.cursor.line - 1, splitCol)
       # Auto-indent: insert indentation at start of new line
       if indent.len > 0:
-        for i, ch in indent:
-          state.buffer.insertChar(Position(line: state.cursor.line, col: i), ch)
-        state.cursor.col = indent.len
+        for r in indent.runes:
+          state.buffer.insertRune(Position(line: state.cursor.line, col: state.cursor.col), r)
+          state.cursor.col += ($r).len
       sendEditUpdate(state, state.cursor.line - 1, state.cursor.line)
 
   of kkBackspace:
     if completionState.active:
       closeCompletion()
     if state.cursor.col > 0:
-      state.cursor.col -= 1
-      let ch = state.buffer.deleteChar(state.cursor)
+      let line = state.buffer.getLine(state.cursor.line)
+      state.cursor.col = prevRuneStart(line, state.cursor.col)
+      let deleted = state.buffer.deleteRune(state.cursor)
       state.buffer.undo.pushUndo(UndoEntry(
         op: uoDelete,
         offset: state.buffer.byteOffsetOf(state.cursor),
-        text: $ch,
+        text: deleted,
       ))
       # Shift tokens left from deletion point
-      shiftTokensLeft(state.cursor.line, state.cursor.col, 1)
+      shiftTokensLeft(state.cursor.line, state.cursor.col, deleted.len)
       sendEditUpdate(state, state.cursor.line, state.cursor.line)
     elif state.cursor.line > 0:
       # Join with previous line
@@ -142,14 +145,14 @@ proc handleInsertMode*(state: var EditorState, key: InputKey) =
       closeCompletion()
     if state.cursor.col < state.buffer.lineLen(state.cursor.line):
       let delOffset = state.buffer.byteOffsetOf(state.cursor)
-      let ch = state.buffer.deleteChar(state.cursor)
+      let deleted = state.buffer.deleteRune(state.cursor)
       state.buffer.undo.pushUndo(UndoEntry(
         op: uoDelete,
         offset: delOffset,
-        text: $ch,
+        text: deleted,
       ))
       # Shift tokens left from deletion point
-      shiftTokensLeft(state.cursor.line, state.cursor.col, 1)
+      shiftTokensLeft(state.cursor.line, state.cursor.col, deleted.len)
       sendEditUpdate(state, state.cursor.line, state.cursor.line)
     elif state.cursor.line < state.buffer.lastLine:
       let joinCol = state.buffer.lineLen(state.cursor.line)
@@ -175,7 +178,7 @@ proc handleInsertMode*(state: var EditorState, key: InputKey) =
           offset: state.buffer.byteOffsetOf(state.cursor),
           text: " ",
         ))
-        state.buffer.insertChar(state.cursor, ' ')
+        state.buffer.insertRune(state.cursor, Rune(ord(' ')))
         state.cursor.col += 1
       shiftTokensRight(state.cursor.line, state.cursor.col - tabSize, tabSize)
       sendEditUpdate(state, state.cursor.line, state.cursor.line)
@@ -203,7 +206,7 @@ proc handleInsertMode*(state: var EditorState, key: InputKey) =
 
   of kkCtrlKey:
     case key.ctrl
-    of ' ':
+    of Rune(ord(' ')):
       # Ctrl-Space: trigger completion
       if lspState == lsRunning and lspDocumentUri.len > 0:
         # Send latest text first
@@ -213,11 +216,11 @@ proc handleInsertMode*(state: var EditorState, key: InputKey) =
         sendToLsp(buildCompletion(id, lspDocumentUri, state.cursor.line, state.cursor.col))
         addPendingRequest(id, "textDocument/completion")
         completionState.triggerCol = state.cursor.col
-    of 'n':
+    of Rune(ord('n')):
       # Ctrl-N: next completion item
       if completionState.active and completionState.items.len > 0:
         completionState.selectedIndex = (completionState.selectedIndex + 1) mod completionState.items.len
-    of 'p':
+    of Rune(ord('p')):
       # Ctrl-P: previous completion item
       if completionState.active and completionState.items.len > 0:
         completionState.selectedIndex = (completionState.selectedIndex - 1 + completionState.items.len) mod completionState.items.len

@@ -1,6 +1,6 @@
 ## Terminal I/O: raw mode, ANSI escape output, key reading
 
-import std/posix
+import std/[posix, unicode]
 import posix/termios as ptermios
 import types
 
@@ -74,7 +74,7 @@ proc readKey*(): InputKey =
 
   # Ctrl keys (1-26, except 9=Tab, 13=Enter)
   if b >= 1 and b <= 26 and b != 9 and b != 13:
-    return ctrlKey(chr(b + ord('a') - 1))
+    return ctrlKey(Rune(b + ord('a') - 1))
 
   # Escape or escape sequence
   if b == 27:
@@ -125,9 +125,25 @@ proc readKey*(): InputKey =
     else:
       return specialKey(kkEscape)
 
-  # Printable characters
+  # Multi-byte UTF-8
+  if b >= 0x80:
+    var bytes: string
+    bytes.add(chr(b))
+    let expectedLen = if (b and 0xE0) == 0xC0: 2
+      elif (b and 0xF0) == 0xE0: 3
+      elif (b and 0xF8) == 0xF0: 4
+      else: 1
+    for _ in 1..<expectedLen:
+      let nb = readByte()
+      if nb == -1: return noKey()
+      bytes.add(chr(nb))
+    var r: Rune
+    fastRuneAt(bytes, 0, r, false)
+    return charKey(r)
+
+  # Printable ASCII
   if b >= 32 and b <= 126:
-    return charKey(chr(b))
+    return charKey(Rune(b))
 
   return noKey()
 

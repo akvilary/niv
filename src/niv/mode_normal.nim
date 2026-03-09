@@ -1,5 +1,6 @@
 ## Normal mode key handler
 
+import std/unicode
 import types
 import buffer
 import cursor
@@ -34,18 +35,18 @@ proc handleNormalMode*(state: var EditorState, key: InputKey) =
   # Sidebar keybindings (checked before input sequence parser)
   if key.kind == kkCtrlKey:
     case key.ctrl
-    of 'e':
+    of Rune(ord('e')):
       toggleSidebar(state.sidebar)
       if state.sidebar.visible:
         state.sidebar.focused = true
         state.mode = mExplore
       return
-    of 'w':
+    of Rune(ord('w')):
       if state.sidebar.visible:
         state.sidebar.focused = true
         state.mode = mExplore
         return
-    of 'g':
+    of Rune(ord('g')):
       if state.gitPanel.visible:
         closeGitPanel(state.gitPanel)
         state.mode = mNormal
@@ -113,7 +114,9 @@ proc handleNormalMode*(state: var EditorState, key: InputKey) =
     state.mode = mInsert
   of akInsertAfter:
     if state.buffer.lineLen(state.cursor.line) > 0:
-      state.cursor.col += 1
+      let line = state.buffer.getLine(state.cursor.line)
+      let rl = runeLenAt(line, state.cursor.col)
+      state.cursor.col += rl
     state.mode = mInsert
   of akInsertLineBelow:
     let lineNum = state.cursor.line
@@ -163,11 +166,11 @@ proc handleNormalMode*(state: var EditorState, key: InputKey) =
   of akDeleteChar:
     if state.buffer.lineLen(state.cursor.line) > 0:
       let delOffset = state.buffer.byteOffsetOf(state.cursor)
-      let ch = state.buffer.deleteChar(state.cursor)
+      let deleted = state.buffer.deleteRune(state.cursor)
       state.buffer.undo.pushUndo(UndoEntry(
         op: uoDelete,
         offset: delOffset,
-        text: $ch,
+        text: deleted,
       ))
       state.buffer.undo.commitGroup()
       state.cursor = clampCursor(state.buffer, state.cursor, mNormal)
