@@ -32,6 +32,7 @@ type
     ntBuiltinConst   # 13 - true, false, nil
     ntDecorator      # 14 - pragmas {.name.}
     ntEnumMember     # 15 - enum members
+    ntResultVar      # 16 - implicit result variable
 
   NimToken = object
     kind: NimTokenKind
@@ -68,6 +69,7 @@ const
   stBuiltinConst = 13
   stDecorator = 14
   stEnumMember = 15
+  stResultVar = 16
 
 # ---------------------------------------------------------------------------
 # Nim language data
@@ -525,6 +527,8 @@ proc tokenizeNim(text: string, startLine: int = 0, endLine: int = int.high): (se
       elif word[0] in {'A'..'Z'}:
         # Uppercase identifier — likely a type
         tokens.add(NimToken(kind: ntType, line: sLine, col: sCol, length: length))
+      elif word == "result":
+        tokens.add(NimToken(kind: ntResultVar, line: sLine, col: sCol, length: length))
       else:
         # Check if it's a function call: identifier followed by (
         var lookPos = pos
@@ -679,6 +683,7 @@ proc encodeSemanticTokens(tokens: seq[NimToken]): seq[int] =
       of ntBuiltinConst: stBuiltinConst
       of ntDecorator: stDecorator
       of ntEnumMember: stEnumMember
+      of ntResultVar: stResultVar
     result.add(deltaLine)
     result.add(deltaCol)
     result.add(tok.length)
@@ -1210,7 +1215,8 @@ proc main() =
               "tokenTypes": ["keyword", "string", "number", "comment",
                              "function", "method", "type", "macro",
                              "builtinFunction", "operator", "parameter", "property",
-                             "namespace", "builtinConstant", "decorator", "enumMember"],
+                             "namespace", "builtinConstant", "decorator", "enumMember",
+                             "selfParameter"],
               "tokenModifiers": []
             },
             "full": true,
