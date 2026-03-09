@@ -197,6 +197,7 @@ proc tokenizeNim(text: string, startLine: int = 0, endLine: int = int.high): (se
   var afterTypeEquals = false  # after = in type definition
   var inEnumBody = false
   var enumIndent = 0
+  var enumMemberSet: HashSet[string]
 
   proc isIdentChar(c: char): bool =
     c in {'a'..'z', 'A'..'Z', '0'..'9', '_'}
@@ -409,6 +410,7 @@ proc tokenizeNim(text: string, startLine: int = 0, endLine: int = int.high): (se
           inc p
         if indent >= enumIndent and p == startPos:
           tokens.add(NimToken(kind: ntEnumMember, line: sLine, col: sCol, length: length))
+          enumMemberSet.incl(word)
           classifiedAsEnum = true
         elif indent < enumIndent:
           inEnumBody = false
@@ -529,6 +531,8 @@ proc tokenizeNim(text: string, startLine: int = 0, endLine: int = int.high): (se
         tokens.add(NimToken(kind: ntType, line: sLine, col: sCol, length: length))
       elif word == "result":
         tokens.add(NimToken(kind: ntResultVar, line: sLine, col: sCol, length: length))
+      elif word in enumMemberSet:
+        tokens.add(NimToken(kind: ntEnumMember, line: sLine, col: sCol, length: length))
       else:
         # Check if it's a function call: identifier followed by (
         var lookPos = pos
