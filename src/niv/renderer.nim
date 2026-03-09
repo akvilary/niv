@@ -29,6 +29,7 @@ const
   colPurple   = 0x9d7cd8
   colBlue     = 0x7aa2f7
   colComment  = 0x565f89
+  colTeal     = 0x73daca
 
 proc renderSidebar(state: EditorState, editorRows: int) =
   let sb = state.sidebar
@@ -64,15 +65,32 @@ proc renderSidebar(state: EditorState, editorRows: int) =
       if idx == sb.cursorIndex and sb.focused:
         setColorBg(colCursorLn)
 
-      if node.kind == fnkDirectory:
-        setColorFg(colPurple)
-      elif node.name.contains('.'):
-        setColorFg(colBlue)
-      else:
-        setColorFg(colComment)
-
+      let prefix = indent & icon
       let truncated = if label.len > w: label[0..<w] else: label
-      stdout.write(truncated)
+      let prefixLen = prefix.len
+
+      if node.kind == fnkDirectory:
+        setColorFg(colBlue)
+        stdout.write(truncated)
+      else:
+        if prefixLen <= truncated.len:
+          setColorFg(colFg)
+          stdout.write(truncated[0..<prefixLen])
+          let dotIdx = node.name.rfind('.')
+          if dotIdx > 0:
+            let baseName = node.name[0..<dotIdx]
+            let ext = node.name[dotIdx..^1]
+            setColorFg(colFg)
+            stdout.write(baseName)
+            setColorFg(colTeal)
+            stdout.write(ext)
+          else:
+            setColorFg(colComment)
+            stdout.write(truncated[prefixLen..^1])
+        else:
+          setColorFg(colComment)
+          stdout.write(truncated)
+
       if truncated.len < w:
         stdout.write(spaces(w - truncated.len))
 
