@@ -4,9 +4,14 @@ import std/os
 import niv/editor
 import niv/types
 
+const NimblePkgVersion {.strdefine.} = "dev"
+
 proc main() =
   let args = commandLineParams()
   let arg = if args.len > 0: args[0] else: ""
+  if arg == "--version" or arg == "-v":
+    echo "niv " & NimblePkgVersion
+    return
   var state: EditorState
   if arg.len > 0 and dirExists(arg):
     setCurrentDir(arg)
