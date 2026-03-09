@@ -364,7 +364,7 @@ proc run*(state: var EditorState) =
     # Render only when something changed
     if needsRedraw:
       if state.sidebar.visible:
-        adjustSidebarScroll(state.sidebar, state.viewport.height)
+        adjustSidebarScroll(state.sidebar, state.viewport.height - 1)
       render(state)
       needsRedraw = false
 
@@ -412,7 +412,7 @@ proc run*(state: var EditorState) =
       # Render input result immediately — cursor visible before file events
       adjustViewport(state.viewport, state.cursor, state.buffer)
       if state.sidebar.visible:
-        adjustSidebarScroll(state.sidebar, state.viewport.height)
+        adjustSidebarScroll(state.sidebar, state.viewport.height - 1)
       render(state)
       needsRedraw = false
 
