@@ -69,6 +69,12 @@ proc handleExploreMode*(state: var EditorState, key: InputKey) =
           state.statusMessage = "Added to PATH: " & node.path
         else:
           state.statusMessage = "Removed from PATH: " & node.path
+        # Restart LSP so it picks up updated PATH/PYTHONPATH
+        if lspState != lsOff and state.buffer.filePath.len > 0:
+          forceStopLsp()
+          switchLsp(state.buffer.filePath)
+          if lspState == lsRunning:
+            sendDidOpen(state.buffer.filePath, state.buffer.data)
     else:
       discard
 

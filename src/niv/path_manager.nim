@@ -1,20 +1,18 @@
 ## PATH management: save/load project paths, apply to env
 
-import std/[os, json, strutils]
+import std/[os, json, strutils, sequtils]
 
 const
   nivProjectDir = ".niv"
   nivPathsFile = "paths.json"
 
 var savedPaths*: seq[string] = @[]
-var originalPath: string = ""
 
 proc pathsFilePath(): string =
   getCurrentDir() / nivProjectDir / nivPathsFile
 
 proc loadPaths*() =
   savedPaths = @[]
-  originalPath = getEnv("PATH")
   let fp = pathsFilePath()
   if not fileExists(fp):
     return
@@ -39,17 +37,12 @@ proc savePaths() =
   writeFile(pathsFilePath(), pretty(node) & "\n")
 
 proc applyPathsToEnv*() =
+  ## Prepend savedPaths to PATH and PYTHONPATH (used at startup)
   if savedPaths.len == 0:
-    putEnv("PATH", originalPath)
     return
-  var parts: seq[string] = @[]
-  for p in savedPaths:
-    if p notin parts:
-      parts.add(p)
-  for existing in originalPath.split(':'):
-    if existing.len > 0 and existing notin parts:
-      parts.add(existing)
-  putEnv("PATH", parts.join(":"))
+  let joined = savedPaths.join(":")
+  putEnv("PATH", joined & ":" & getEnv("PATH"))
+  putEnv("PYTHONPATH", joined & ":" & getEnv("PYTHONPATH"))
 
 proc isPathSaved*(path: string): bool =
   path in savedPaths
@@ -60,10 +53,12 @@ proc togglePath*(path: string): bool =
   if idx >= 0:
     savedPaths.delete(idx)
     savePaths()
-    applyPathsToEnv()
+    putEnv("PATH", getEnv("PATH").split(':').filterIt(it != path).join(":"))
+    putEnv("PYTHONPATH", getEnv("PYTHONPATH").split(':').filterIt(it != path).join(":"))
     return false
   else:
     savedPaths.add(path)
     savePaths()
-    applyPathsToEnv()
+    putEnv("PATH", path & ":" & getEnv("PATH"))
+    putEnv("PYTHONPATH", path & ":" & getEnv("PYTHONPATH"))
     return true
