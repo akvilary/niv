@@ -420,6 +420,13 @@ proc tokenizePython(text: string, startLine: int = 0, endLine: int = int.high;
             tokens.add(PythonToken(kind: ptFunction, line: sLine, col: sCol, length: length))
           else:
             tokens.add(PythonToken(kind: ptProperty, line: sLine, col: sCol, length: length))
+        elif callDepth > 0 and (block:
+          var lp = pos
+          while lp < text.len and text[lp] in {' ', '\t'}: inc lp
+          lp < text.len and text[lp] == '=' and
+            (lp + 1 >= text.len or text[lp + 1] != '=')):
+          # Keyword argument: identifier= inside function call (not ==)
+          tokens.add(PythonToken(kind: ptParameter, line: sLine, col: sCol, length: length))
         elif word in builtinConstSet:
           tokens.add(PythonToken(kind: ptBuiltinConst, line: sLine, col: sCol, length: length))
         elif word in kwOperatorSet:
@@ -441,10 +448,6 @@ proc tokenizePython(text: string, startLine: int = 0, endLine: int = int.high;
             inc lookPos
           if lookPos < text.len and text[lookPos] == '(':
             tokens.add(PythonToken(kind: ptFunction, line: sLine, col: sCol, length: length))
-          elif callDepth > 0 and lookPos < text.len and text[lookPos] == '=' and
-               (lookPos + 1 >= text.len or text[lookPos + 1] != '='):
-            # Keyword argument: identifier= inside function call (not ==)
-            tokens.add(PythonToken(kind: ptParameter, line: sLine, col: sCol, length: length))
           elif isDunder(word):
             tokens.add(PythonToken(kind: ptDunder, line: sLine, col: sCol, length: length))
           elif isUpperConst(word):
