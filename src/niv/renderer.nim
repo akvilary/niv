@@ -58,7 +58,7 @@ proc renderSidebar(state: EditorState, editorRows: int) =
       let node = sb.flatList[idx]
       let indent = spaces(node.depth * 2)
       let icon = if node.kind == fnkDirectory:
-        if node.expanded: "v " else: "> "
+        if node.expanded: "\xF0\x9F\x93\x82 " else: "\xF0\x9F\x93\x81 "  # 📂 / 📁
       else:
         "  "
       let suffix = if node.kind == fnkDirectory: "/" else: ""
@@ -73,26 +73,22 @@ proc renderSidebar(state: EditorState, editorRows: int) =
       let extStart = if dotIdx > 0: prefixLen + dotIdx else: label.len
 
       var pos = startPos
-      var written = 0
 
       let inPath = isPathSaved(node.path)
       if inPath:
         setColorFg(colCyan)
         if pos < label.len:
           stdout.write(label[pos..^1])
-          written = label.len - pos
       elif node.kind == fnkDirectory:
         setColorFg(colBlue)
         if pos < label.len:
           stdout.write(label[pos..^1])
-          written = label.len - pos
       else:
         # Prefix region
         if pos < prefixLen:
           setColorFg(colFg)
           let regionEnd = min(prefixLen, label.len)
           stdout.write(label[pos..<regionEnd])
-          written += regionEnd - pos
           pos = regionEnd
         # BaseName region
         if pos < extStart and pos < label.len:
@@ -101,16 +97,15 @@ proc renderSidebar(state: EditorState, editorRows: int) =
           else:
             setColorFg(colComment)
           stdout.write(label[pos..<extStart])
-          written += extStart - pos
           pos = extStart
         # Extension region
         if dotIdx > 0 and pos < label.len:
           setColorFg(colTeal)
           stdout.write(label[pos..^1])
-          written += label.len - pos
 
-      if written < w:
-        stdout.write(spaces(w - written))
+      let displayCols = displayWidth(label, startPos, label.len)
+      if displayCols < w:
+        stdout.write(spaces(w - displayCols))
 
       setThemeFg()
       if idx == sb.cursorIndex and sb.focused:

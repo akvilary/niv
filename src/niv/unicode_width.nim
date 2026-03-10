@@ -2,14 +2,28 @@
 
 import std/unicode
 
+proc runeDisplayWidth*(r: Rune): int =
+  ## Returns display width of a single rune (1 or 2 columns)
+  let cp = r.int
+  if (cp >= 0x1100 and cp <= 0x115F) or   # Hangul Jamo
+     (cp >= 0x2E80 and cp <= 0x9FFF) or    # CJK Unified + Radicals
+     (cp >= 0xAC00 and cp <= 0xD7AF) or    # Hangul Syllables
+     (cp >= 0xF900 and cp <= 0xFAFF) or    # CJK Compatibility Ideographs
+     (cp >= 0xFE10 and cp <= 0xFE6F) or    # CJK Forms + Small Forms
+     (cp >= 0xFF01 and cp <= 0xFF60) or    # Fullwidth Forms
+     (cp >= 0xFFE0 and cp <= 0xFFE6) or    # Fullwidth Signs
+     (cp >= 0x1F000 and cp <= 0x1FFFF) or  # Emoji, Mahjong, Playing Cards
+     (cp >= 0x20000 and cp <= 0x2FA1F):    # CJK Extension B+
+    return 2
+  return 1
+
 proc displayWidth*(s: string, startByte, endByte: int): int =
   ## Count display columns for s[startByte..<endByte]
-  ## Each rune = 1 column (correct for Latin, Cyrillic, etc.)
   var i = startByte
   let e = min(endByte, s.len)
   while i < e:
     let rl = runeLenAt(s, i)
-    result += 1
+    result += runeDisplayWidth(runeAt(s, i))
     i += rl
 
 proc displayWidth*(s: string): int =
