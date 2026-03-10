@@ -8,6 +8,7 @@ import lsp_client
 import lsp_types
 import highlight
 import fileio
+import path_manager
 
 proc openFileFromSidebar(state: var EditorState, filePath: string) =
   ## Open a file from the sidebar with proper LSP integration
@@ -60,6 +61,14 @@ proc handleExploreMode*(state: var EditorState, key: InputKey) =
       state.sidebar.visible = false
       state.sidebar.focused = false
       state.mode = mNormal
+    of Rune(ord('s')):
+      if state.sidebar.flatList.len > 0:
+        let node = state.sidebar.flatList[state.sidebar.cursorIndex]
+        let added = togglePath(node.path)
+        if added:
+          state.statusMessage = "Added to PATH: " & node.path
+        else:
+          state.statusMessage = "Removed from PATH: " & node.path
     else:
       discard
 

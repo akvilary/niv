@@ -11,6 +11,7 @@ import lsp_types
 import highlight
 import git
 import unicode_width
+import path_manager
 
 # Tokyo Night Storm palette
 const
@@ -69,7 +70,11 @@ proc renderSidebar(state: EditorState, editorRows: int) =
       let truncated = if label.len > w: label[0..<w] else: label
       let prefixLen = prefix.len
 
-      if node.kind == fnkDirectory:
+      let inPath = isPathSaved(node.path)
+      if inPath:
+        setColorFg(colCyan)
+        stdout.write(truncated)
+      elif node.kind == fnkDirectory:
         setColorFg(colBlue)
         stdout.write(truncated)
       else:

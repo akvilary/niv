@@ -20,6 +20,7 @@ import lsp_protocol
 import highlight
 import fileio
 import jumplist
+import path_manager
 
 proc updateGitInfo(state: var EditorState) =
   try:
@@ -52,6 +53,8 @@ proc newEditorState*(filePath: string = ""): EditorState =
   result.mode = mNormal
   result.running = true
   result.sidebar = initSidebar()
+  loadPaths()
+  applyPathsToEnv()
   initLspManager()
   updateGitInfo(result)
   if filePath.len > 0:
