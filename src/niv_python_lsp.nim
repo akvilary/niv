@@ -1030,14 +1030,43 @@ proc findMethodWithMRO(text: string, className: string, methodName: string,
 
   return ("", -1, -1)
 
+proc findEnclosingClass(text: string, useLine: int): string =
+  ## Find the class that encloses the given line by comparing indentation.
+  let lines = text.split('\n')
+  var defIndent = -1
+  for i in countdown(min(useLine, lines.len - 1), 0):
+    let stripped = lines[i].strip()
+    if stripped.startsWith("def "):
+      defIndent = lines[i].len - stripped.len
+      break
+  if defIndent < 0:
+    return ""
+  for i in countdown(min(useLine, lines.len - 1), 0):
+    let stripped = lines[i].strip()
+    if stripped.startsWith("class "):
+      let classIndent = lines[i].len - stripped.len
+      if classIndent < defIndent:
+        let afterClass = stripped[6..^1]
+        var name = ""
+        for c in afterClass:
+          if c in {'a'..'z', 'A'..'Z', '0'..'9', '_'}:
+            name.add(c)
+          else: break
+        return name
+  return ""
+
 proc resolveQualifierType(text: string, qualifier: string, useLine: int): string =
   ## Try to determine the type of a variable.
   ## Returns class name or "".
-  # 1. If qualifier starts with uppercase → likely a class itself
+  # 1. self/cls → find enclosing class
+  if qualifier == "self" or qualifier == "cls":
+    return findEnclosingClass(text, useLine)
+
+  # 2. If qualifier starts with uppercase → likely a class itself
   if qualifier.len > 0 and qualifier[0] in {'A'..'Z'}:
     return qualifier
 
-  # 2. Search for assignment: qualifier = ClassName( above current line
+  # 3. Search for assignment: qualifier = ClassName( above current line
   let lines = text.split('\n')
   for i in countdown(min(useLine, lines.len - 1), 0):
     let stripped = lines[i].strip()
@@ -1054,7 +1083,7 @@ proc resolveQualifierType(text: string, qualifier: string, useLine: int): string
         if className.len > 0 and className[0] in {'A'..'Z'}:
           return className
 
-  # 3. Search for type hint in function parameters: (qualifier: ClassName, ...)
+  # 4. Search for type hint in function parameters: (qualifier: ClassName, ...)
   for i in countdown(min(useLine, lines.len - 1), 0):
     let ln = lines[i].strip()
     if ln.startsWith("def "):
