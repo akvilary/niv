@@ -190,6 +190,7 @@ proc tokenizeNim(text: string, startLine: int = 0, endLine: int = int.high): (se
   var afterDot = false
   var inImportLine = false
   var inFromLine = false
+  var inImportBracket = false  # inside [...] in import line
 
   # Type section tracking
   var inTypeSection {.used.} = false
@@ -211,8 +212,9 @@ proc tokenizeNim(text: string, startLine: int = 0, endLine: int = int.high): (se
         inc line
         col = 0
         lastKeyword = ""
-        inImportLine = false
-        inFromLine = false
+        if not inImportBracket:
+          inImportLine = false
+          inFromLine = false
         afterDot = false
         afterTypeEquals = false
       else:
@@ -626,9 +628,14 @@ proc tokenizeNim(text: string, startLine: int = 0, endLine: int = int.high): (se
       advance()
 
     of '[':
+      if inImportLine:
+        inImportBracket = true
       advance()
 
     of ']':
+      if inImportBracket:
+        inImportBracket = false
+        inImportLine = false
       advance()
 
     # Comma in params
@@ -751,34 +758,64 @@ proc initNimPaths() =
     except CatchableError:
       discard
 
+proc collectBracketContent(lines: openArray[string], startIdx: int, firstPart: string): (string, int) =
+  ## Collect content from potentially multiline [...] import.
+  ## Returns (content inside brackets, last consumed line index).
+  var raw = firstPart
+  let closeIdx = raw.find(']')
+  if closeIdx >= 0:
+    return (raw[0..<closeIdx], startIdx)
+  var idx = startIdx + 1
+  while idx < lines.len:
+    let ln = lines[idx].strip()
+    let ci = ln.find(']')
+    if ci >= 0:
+      if ci > 0:
+        raw.add(", " & ln[0..<ci])
+      return (raw, idx)
+    if ln.len > 0:
+      raw.add(", " & ln)
+    inc idx
+  return (raw, idx)
+
 proc parseNimImports(text: string, fileDir: string): seq[ImportInfo] =
-  for rawLine in text.split('\n'):
-    let line = rawLine.strip()
+  let lines = text.split('\n')
+  var i = 0
+  while i < lines.len:
+    let line = lines[i].strip()
     if line.startsWith("from "):
       let rest = line[5..^1].strip()
       let importIdx = rest.find(" import ")
-      if importIdx < 0: continue
+      if importIdx < 0:
+        inc i
+        continue
       let module = rest[0..<importIdx].strip()
       let namesStr = rest[importIdx + 8..^1].strip()
       var names: seq[string]
-      for part in namesStr.split(','):
-        let n = part.strip()
-        if n.len > 0: names.add(n)
+      if namesStr.startsWith("["):
+        let (content, endIdx) = collectBracketContent(lines, i, namesStr[1..^1])
+        i = endIdx
+        for part in content.split(','):
+          let n = part.strip()
+          if n.len > 0: names.add(n)
+      else:
+        for part in namesStr.split(','):
+          let n = part.strip()
+          if n.len > 0: names.add(n)
       result.add(ImportInfo(module: module, names: names))
     elif line.startsWith("import "):
       let rest = line[7..^1].strip()
-      # Handle import std/[a, b, c]
+      # Handle import std/[a, b, c] (potentially multiline)
       let slashBracket = rest.find("/[")
       if slashBracket >= 0:
         let prefix = rest[0..slashBracket]  # e.g. "std/"
-        let bracketStart = slashBracket + 2
-        let bracketEnd = rest.find(']', bracketStart)
-        if bracketEnd > bracketStart:
-          let modules = rest[bracketStart..<bracketEnd]
-          for part in modules.split(','):
-            let m = part.strip()
-            if m.len > 0:
-              result.add(ImportInfo(module: prefix & m))
+        let afterBracket = rest[slashBracket + 2..^1]
+        let (content, endIdx) = collectBracketContent(lines, i, afterBracket)
+        i = endIdx
+        for part in content.split(','):
+          let m = part.strip()
+          if m.len > 0:
+            result.add(ImportInfo(module: prefix & m))
       else:
         for part in rest.split(','):
           let trimmed = part.strip()
@@ -790,6 +827,7 @@ proc parseNimImports(text: string, fileDir: string): seq[ImportInfo] =
     elif line.startsWith("include "):
       let rest = line[8..^1].strip()
       result.add(ImportInfo(module: rest))
+    inc i
 
 proc resolveNimModule(moduleName: string, fileDir: string): string =
   if modulePathCache.hasKey(moduleName):
