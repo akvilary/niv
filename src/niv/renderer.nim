@@ -68,6 +68,7 @@ proc renderSidebar(state: EditorState, editorRows: int) =
         setColorBg(colCursorLn)
 
       let startPos = min(hScroll, label.len)
+      let endPos = byteOffsetForWidth(label, startPos, w)
       let prefixLen = indent.len + icon.len
       let dotIdx = node.name.rfind('.')
       let extStart = if dotIdx > 0: prefixLen + dotIdx else: label.len
@@ -77,33 +78,33 @@ proc renderSidebar(state: EditorState, editorRows: int) =
       let inPath = isPathSaved(node.path)
       if inPath:
         setColorFg(colCyan)
-        if pos < label.len:
-          stdout.write(label[pos..^1])
+        if pos < endPos:
+          stdout.write(label[pos..<endPos])
       elif node.kind == fnkDirectory:
         setColorFg(colBlue)
-        if pos < label.len:
-          stdout.write(label[pos..^1])
+        if pos < endPos:
+          stdout.write(label[pos..<endPos])
       else:
         # Prefix region
-        if pos < prefixLen:
+        if pos < prefixLen and pos < endPos:
           setColorFg(colFg)
-          let regionEnd = min(prefixLen, label.len)
+          let regionEnd = min(prefixLen, endPos)
           stdout.write(label[pos..<regionEnd])
           pos = regionEnd
         # BaseName region
-        if pos < extStart and pos < label.len:
+        if pos < extStart and pos < endPos:
           if dotIdx > 0:
             setColorFg(colFg)
           else:
             setColorFg(colComment)
-          stdout.write(label[pos..<extStart])
-          pos = extStart
+          stdout.write(label[pos..<min(extStart, endPos)])
+          pos = min(extStart, endPos)
         # Extension region
-        if dotIdx > 0 and pos < label.len:
+        if dotIdx > 0 and pos < endPos:
           setColorFg(colTeal)
-          stdout.write(label[pos..^1])
+          stdout.write(label[pos..<endPos])
 
-      let displayCols = displayWidth(label, startPos, label.len)
+      let displayCols = displayWidth(label, startPos, endPos)
       if displayCols < w:
         stdout.write(spaces(w - displayCols))
 
@@ -112,6 +113,13 @@ proc renderSidebar(state: EditorState, editorRows: int) =
         setThemeColors()
     else:
       stdout.write(spaces(w))
+
+  # Vertical separator
+  for row in 1..visibleRows:
+    moveCursor(row, w + 1)
+    setColorFg(colGutter)
+    stdout.write("\xe2\x94\x82")  # │ (U+2502)
+    setThemeFg()
 
 proc renderModalRow(startCol, innerWidth: int, line: string) =
   ## Render a single content row inside the modal: │ content │
@@ -578,12 +586,6 @@ proc render*(state: EditorState) =
 
   # Draw editor buffer (frozen when in commit mode)
   for row in 0..<editorRows:
-    # Draw separator over any sidebar overflow (editor has higher z-index)
-    if sidebarVisible and not inCommit:
-      moveCursor(row + 1, state.sidebar.width + 1)
-      setColorFg(colGutter)
-      stdout.write("\xe2\x94\x82")  # │ (U+2502)
-      setThemeFg()
     moveCursor(row + 1, colOffset + 1)
     clearLine()
 
