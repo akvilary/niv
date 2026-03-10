@@ -198,14 +198,6 @@ proc tokenizePython(text: string, startLine: int = 0, endLine: int = int.high): 
   # Function call parenthesis depth (for keyword argument detection)
   var callDepth = 0
 
-  # Class base class tracking
-  var inClassBases = false
-
-  # Type annotation tracking (e.g. x: Optional[int] = None)
-  var inTypeAnnotation = false
-  var typeAnnotBracketDepth = 0
-  var afterBlockKeyword = false
-
   proc isIdentChar(c: char): bool =
     c in {'a'..'z', 'A'..'Z', '0'..'9', '_'}
 
@@ -236,9 +228,6 @@ proc tokenizePython(text: string, startLine: int = 0, endLine: int = int.high): 
           inImportLine = false
           inFromLine = false
         afterDot = false
-        afterBlockKeyword = false
-        if not inClassBases and typeAnnotBracketDepth == 0:
-          inTypeAnnotation = false
         # Don't reset inFuncParams - params can span lines
       else:
         inc col
@@ -425,13 +414,6 @@ proc tokenizePython(text: string, startLine: int = 0, endLine: int = int.high): 
           tokens.add(PythonToken(kind: ptOperator, line: sLine, col: sCol, length: length))
         elif word in keywordSet:
           tokens.add(PythonToken(kind: ptKeyword, line: sLine, col: sCol, length: length))
-          if word in ["if", "elif", "else", "for", "while", "try",
-                       "except", "finally", "with", "lambda", "case", "match"]:
-            afterBlockKeyword = true
-        elif inClassBases:
-          tokens.add(PythonToken(kind: ptType, line: sLine, col: sCol, length: length))
-        elif inTypeAnnotation:
-          tokens.add(PythonToken(kind: ptType, line: sLine, col: sCol, length: length))
         elif word in builtinTypeSet:
           tokens.add(PythonToken(kind: ptType, line: sLine, col: sCol, length: length))
         elif word in builtinFuncSet:
@@ -554,8 +536,6 @@ proc tokenizePython(text: string, startLine: int = 0, endLine: int = int.high): 
         isFirstParam = true
         afterParamColon = false
         expectParam = false
-      elif tokens.len > 0 and tokens[^1].kind == ptClass:
-        inClassBases = true
       else:
         inc callDepth
       expectDefParams = false
@@ -571,9 +551,6 @@ proc tokenizePython(text: string, startLine: int = 0, endLine: int = int.high): 
         if funcParamDepth <= 0:
           inFuncParams = false
           funcParamDepth = 0
-          inTypeAnnotation = false
-      elif inClassBases:
-        inClassBases = false
       elif callDepth > 0:
         dec callDepth
       advance()
@@ -585,20 +562,14 @@ proc tokenizePython(text: string, startLine: int = 0, endLine: int = int.high): 
       if inFuncParams:
         afterParamColon = false
         expectParam = false
-        inTypeAnnotation = false
       advance()
 
-    # Colon in func params (type annotation) or variable annotation
+    # Colon in func params (type annotation)
     of ':':
       lastKeyword = ""
       afterDot = false
       if inFuncParams and funcParamDepth == 1:
         afterParamColon = true
-        inTypeAnnotation = true
-        typeAnnotBracketDepth = 0
-      elif callDepth == 0 and not inClassBases and not afterBlockKeyword:
-        inTypeAnnotation = true
-        typeAnnotBracketDepth = 0
       advance()
 
     # Star / double star for *args, **kwargs
@@ -633,8 +604,6 @@ proc tokenizePython(text: string, startLine: int = 0, endLine: int = int.high): 
         afterParamColon = true  # skip default value tokens as params
       else:
         tokens.add(PythonToken(kind: ptOperator, line: sLine, col: sCol, length: length))
-      if length == 1:
-        inTypeAnnotation = false
     of '!':
       lastKeyword = ""; afterDot = false
       let sLine = line; let sCol = col
@@ -684,19 +653,8 @@ proc tokenizePython(text: string, startLine: int = 0, endLine: int = int.high): 
         advance(); inc length
       tokens.add(PythonToken(kind: ptOperator, line: sLine, col: sCol, length: length))
 
-    # Brackets
-    of '[':
-      lastKeyword = ""; afterDot = false
-      if inTypeAnnotation:
-        inc typeAnnotBracketDepth
-      advance()
-    of ']':
-      lastKeyword = ""; afterDot = false
-      if inTypeAnnotation and typeAnnotBracketDepth > 0:
-        dec typeAnnotBracketDepth
-      advance()
-    # Other punctuation — skip
-    of '{', '}', ';', '\\':
+    # Brackets and other punctuation — skip
+    of '[', ']', '{', '}', ';', '\\':
       lastKeyword = ""; afterDot = false
       advance()
     else:
