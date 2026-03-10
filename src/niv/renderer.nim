@@ -302,7 +302,7 @@ proc renderGitPanel(state: EditorState, startRow, panelHeight, totalWidth: int) 
       displayLines.add((" No changes", true, -1))
 
     # Help line
-    let helpLine = " s:stage/unstage  d:discard  c:commit  l:log  Enter:diff  r:refresh  q:close"
+    let helpLine = " s:stage/unstage  d:discard  c:commit  m:merge  l:log  Enter:diff  r:refresh  q:close"
 
     # Adjust scroll to keep cursor visible
     # Map cursorIndex to display line index
@@ -511,6 +511,60 @@ proc renderGitPanel(state: EditorState, startRow, panelHeight, totalWidth: int) 
 
           if isSelected:
             let written = 3 + entry.hash.len + 1 + entry.message.len
+            if written < contentWidth:
+              stdout.write(spaces(contentWidth - written))
+            setThemeColors()
+      elif row == contentRows:
+        setColorFg(colGutter)
+        let truncHelp = if helpLine.len > contentWidth: helpLine[0..<contentWidth] else: helpLine
+        stdout.write(truncHelp)
+        setThemeFg()
+
+  of gvMergeConflicts:
+    let contentRows = panelHeight - 2
+    let helpLine = " o:ours  t:theirs  Enter:commit  q:abort"
+
+    # Adjust scroll
+    var scrollOff = gp.conflictScrollOffset
+    if gp.conflictCursorIndex < scrollOff:
+      scrollOff = gp.conflictCursorIndex
+    elif gp.conflictCursorIndex >= scrollOff + contentRows:
+      scrollOff = gp.conflictCursorIndex - contentRows + 1
+
+    for row in 0..<panelHeight - 1:
+      moveCursor(startRow + 1 + row, 1)
+      setThemeColors()
+      clearLine()
+
+      if row == 0 and scrollOff == 0:
+        setColorFg(colCyan)
+        stdout.write(" Merge Conflicts:")
+        setThemeFg()
+      elif row < contentRows:
+        let adjustedRow = if scrollOff == 0: row - 1 else: row
+        let idx = scrollOff + adjustedRow
+        if idx >= 0 and idx < gp.conflictFiles.len:
+          let cf = gp.conflictFiles[idx]
+          let isSelected = idx == gp.conflictCursorIndex
+
+          if isSelected:
+            setColorBg(colCursorLn)
+
+          if cf.conflictCount > 0:
+            setColorFg(colRed)
+            stdout.write("  C ")
+          else:
+            setColorFg(colGreen)
+            stdout.write("  \xe2\x9c\x93 ")  # ✓
+          setThemeFg()
+          stdout.write(cf.path)
+          if cf.conflictCount > 0:
+            setColorFg(colGutter)
+            stdout.write(" (" & $cf.conflictCount & " conflicts)")
+            setThemeFg()
+
+          if isSelected:
+            let written = 4 + cf.path.len + (if cf.conflictCount > 0: 3 + ($cf.conflictCount).len + 11 else: 0)
             if written < contentWidth:
               stdout.write(spaces(contentWidth - written))
             setThemeColors()

@@ -120,10 +120,19 @@ type
     hash*: string
     message*: string
 
+  ConflictChoice* = enum
+    ccOurs, ccTheirs
+
+  ConflictFile* = object
+    path*: string
+    cursorIndex*: int   # which conflict section is selected
+    conflictCount*: int # total <<<<<<< markers
+
   GitPanelView* = enum
     gvFiles
     gvDiff
     gvLog
+    gvMergeConflicts
 
   GitPanelState* = object
     visible*: bool
@@ -139,6 +148,12 @@ type
     logCursorIndex*: int
     logScrollOffset*: int
     inCommitInput*: bool
+    inMergeInput*: bool        # typing branch name for merge
+    mergeInputBranch*: string  # branch name being typed
+    isMergeCommit*: bool       # commit editor is for merge (not regular commit)
+    conflictFiles*: seq[ConflictFile]
+    conflictCursorIndex*: int
+    conflictScrollOffset*: int
     savedBuffer*: Buffer
     savedCursor*: Position
     savedTopLine*: int

@@ -27,11 +27,14 @@ proc enterCommitInput*(state: var EditorState) =
 
 proc cancelCommitInput*(state: var EditorState) =
   ## Restore original buffer, cancel commit
+  if state.gitPanel.isMergeCommit:
+    discard gitMergeAbort()
   state.buffer = state.gitPanel.savedBuffer
   state.cursor = state.gitPanel.savedCursor
   state.viewport.topLine = state.gitPanel.savedTopLine
   state.viewport.leftCol = 0
   state.gitPanel.inCommitInput = false
+  state.gitPanel.isMergeCommit = false
   state.mode = mGit
 
 proc executeCommitInput*(state: var EditorState) =
@@ -40,20 +43,64 @@ proc executeCommitInput*(state: var EditorState) =
   if message.len == 0:
     state.statusMessage = "Empty commit message"
     return
-  let (ok, msg) = gitCommit(message)
+  let isMerge = state.gitPanel.isMergeCommit
+  let (ok, msg) = if isMerge: gitMergeCommit(message) else: gitCommit(message)
   # Restore original buffer
   state.buffer = state.gitPanel.savedBuffer
   state.cursor = state.gitPanel.savedCursor
   state.viewport.topLine = state.gitPanel.savedTopLine
   state.viewport.leftCol = 0
   state.gitPanel.inCommitInput = false
+  state.gitPanel.isMergeCommit = false
   state.mode = mGit
   if ok:
-    state.statusMessage = "Committed"
+    state.statusMessage = if isMerge: "Merged" else: "Committed"
     refreshGitFiles(state.gitPanel)
     state.gitDiffStat = "+0 -0"
   else:
-    state.statusMessage = "Commit failed: " & msg
+    state.statusMessage = (if isMerge: "Merge commit failed: " else: "Commit failed: ") & msg
+
+proc enterMergeInput*(state: var EditorState) =
+  state.gitPanel.inMergeInput = true
+  state.gitPanel.mergeInputBranch = ""
+  state.statusMessage = "Merge branch: "
+
+proc executeMerge*(state: var EditorState) =
+  let branch = state.gitPanel.mergeInputBranch.strip()
+  state.gitPanel.inMergeInput = false
+  if branch.len == 0:
+    state.statusMessage = ""
+    return
+  let (ok, output) = gitMerge(branch)
+  if ok:
+    # Merge succeeded without conflicts — enter commit message editor
+    let currentBranch = gitCurrentBranch()
+    state.gitPanel.savedBuffer = state.buffer
+    state.gitPanel.savedCursor = state.cursor
+    state.gitPanel.savedTopLine = state.viewport.topLine
+    state.gitPanel.inCommitInput = true
+    state.gitPanel.isMergeCommit = true
+    state.buffer = newBuffer("Merge branch '" & branch & "' into " & currentBranch)
+    state.cursor = Position(line: 0, col: state.buffer.getLine(0).len)
+    state.viewport.topLine = 0
+    state.viewport.leftCol = 0
+    state.mode = mInsert
+  else:
+    # Check for conflicts
+    let conflicts = getConflictFiles()
+    if conflicts.len > 0:
+      state.gitPanel.conflictFiles = conflicts
+      state.gitPanel.conflictCursorIndex = 0
+      state.gitPanel.conflictScrollOffset = 0
+      state.gitPanel.view = gvMergeConflicts
+      state.statusMessage = $conflicts.len & " file(s) with conflicts"
+    else:
+      state.statusMessage = "Merge failed: " & output
+
+proc cancelMergeInput*(state: var EditorState) =
+  state.gitPanel.inMergeInput = false
+  state.gitPanel.mergeInputBranch = ""
+  state.statusMessage = ""
 
 proc handleFilesView(state: var EditorState, key: InputKey) =
   state.statusMessage = ""
@@ -96,6 +143,8 @@ proc handleFilesView(state: var EditorState, key: InputKey) =
       state.gitPanel.logCursorIndex = 0
       state.gitPanel.logScrollOffset = 0
       state.gitPanel.view = gvLog
+    of Rune(ord('m')):
+      enterMergeInput(state)
     of Rune(ord('r')):
       refreshGitFiles(state.gitPanel)
     else:
@@ -194,7 +243,110 @@ proc handleLogView(state: var EditorState, key: InputKey) =
   else:
     discard
 
+proc handleConflictsView(state: var EditorState, key: InputKey) =
+  state.statusMessage = ""
+  let fileCount = state.gitPanel.conflictFiles.len
+
+  case key.kind
+  of kkEscape:
+    discard gitMergeAbort()
+    state.statusMessage = "Merge aborted"
+    refreshGitFiles(state.gitPanel)
+    state.gitPanel.view = gvFiles
+
+  of kkChar:
+    case key.ch
+    of Rune(ord('q')):
+      discard gitMergeAbort()
+      state.statusMessage = "Merge aborted"
+      refreshGitFiles(state.gitPanel)
+      state.gitPanel.view = gvFiles
+    of Rune(ord('j')):
+      if fileCount > 0 and state.gitPanel.conflictCursorIndex < fileCount - 1:
+        inc state.gitPanel.conflictCursorIndex
+    of Rune(ord('k')):
+      if state.gitPanel.conflictCursorIndex > 0:
+        dec state.gitPanel.conflictCursorIndex
+    of Rune(ord('o')):
+      # Accept ours for current conflict in selected file
+      if state.gitPanel.conflictCursorIndex < fileCount:
+        var cf = state.gitPanel.conflictFiles[state.gitPanel.conflictCursorIndex]
+        if cf.conflictCount > 0:
+          if resolveConflict(cf.path, ccOurs, cf.cursorIndex):
+            dec cf.conflictCount
+            if cf.cursorIndex >= cf.conflictCount:
+              cf.cursorIndex = max(0, cf.conflictCount - 1)
+            state.gitPanel.conflictFiles[state.gitPanel.conflictCursorIndex] = cf
+            if cf.conflictCount == 0:
+              discard gitStage(cf.path)
+              state.statusMessage = "Resolved: " & cf.path
+    of Rune(ord('t')):
+      # Accept theirs for current conflict in selected file
+      if state.gitPanel.conflictCursorIndex < fileCount:
+        var cf = state.gitPanel.conflictFiles[state.gitPanel.conflictCursorIndex]
+        if cf.conflictCount > 0:
+          if resolveConflict(cf.path, ccTheirs, cf.cursorIndex):
+            dec cf.conflictCount
+            if cf.cursorIndex >= cf.conflictCount:
+              cf.cursorIndex = max(0, cf.conflictCount - 1)
+            state.gitPanel.conflictFiles[state.gitPanel.conflictCursorIndex] = cf
+            if cf.conflictCount == 0:
+              discard gitStage(cf.path)
+              state.statusMessage = "Resolved: " & cf.path
+    else:
+      discard
+
+  of kkEnter:
+    # All conflicts resolved? → enter commit message editor
+    var allResolved = true
+    for cf in state.gitPanel.conflictFiles:
+      if cf.conflictCount > 0:
+        allResolved = false
+        break
+    if allResolved:
+      let currentBranch = gitCurrentBranch()
+      state.gitPanel.savedBuffer = state.buffer
+      state.gitPanel.savedCursor = state.cursor
+      state.gitPanel.savedTopLine = state.viewport.topLine
+      state.gitPanel.inCommitInput = true
+      state.gitPanel.isMergeCommit = true
+      state.buffer = newBuffer("Merge conflict resolution on " & currentBranch)
+      state.cursor = Position(line: 0, col: state.buffer.getLine(0).len)
+      state.viewport.topLine = 0
+      state.viewport.leftCol = 0
+      state.mode = mInsert
+    else:
+      state.statusMessage = "Resolve all conflicts first"
+
+  of kkArrowDown:
+    if fileCount > 0 and state.gitPanel.conflictCursorIndex < fileCount - 1:
+      inc state.gitPanel.conflictCursorIndex
+  of kkArrowUp:
+    if state.gitPanel.conflictCursorIndex > 0:
+      dec state.gitPanel.conflictCursorIndex
+
+  else:
+    discard
+
 proc handleGitMode*(state: var EditorState, key: InputKey) =
+  # Merge branch input mode
+  if state.gitPanel.inMergeInput:
+    case key.kind
+    of kkChar:
+      state.gitPanel.mergeInputBranch.add($key.ch)
+      state.statusMessage = "Merge branch: " & state.gitPanel.mergeInputBranch
+    of kkBackspace:
+      if state.gitPanel.mergeInputBranch.len > 0:
+        state.gitPanel.mergeInputBranch = state.gitPanel.mergeInputBranch[0..^2]
+      state.statusMessage = "Merge branch: " & state.gitPanel.mergeInputBranch
+    of kkEnter:
+      executeMerge(state)
+    of kkEscape:
+      cancelMergeInput(state)
+    else:
+      discard
+    return
+
   # Confirm discard mode
   if state.gitPanel.confirmDiscard:
     case key.kind
@@ -226,3 +378,5 @@ proc handleGitMode*(state: var EditorState, key: InputKey) =
     handleDiffView(state, key)
   of gvLog:
     handleLogView(state, key)
+  of gvMergeConflicts:
+    handleConflictsView(state, key)

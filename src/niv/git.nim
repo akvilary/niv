@@ -107,6 +107,102 @@ proc gitShowCommit*(hash: string): string =
   except OSError:
     return ""
 
+proc gitMerge*(branch: string): (bool, string) =
+  ## Run git merge --no-commit. Returns (ok, output).
+  try:
+    let (output, code) = execCmdEx("git merge --no-commit " & quoteShell(branch), options = {poUsePath})
+    return (code == 0, output.strip())
+  except OSError:
+    return (false, "Failed to run git merge")
+
+proc gitMergeAbort*(): bool =
+  try:
+    let (_, code) = execCmdEx("git merge --abort", options = {poUsePath})
+    return code == 0
+  except OSError:
+    return false
+
+proc gitMergeCommit*(message: string): (bool, string) =
+  ## Commit a merge (works for both clean merge and resolved conflicts).
+  try:
+    let (output, code) = execCmdEx("git commit -m " & quoteShell(message), options = {poUsePath})
+    return (code == 0, output.strip())
+  except OSError:
+    return (false, "Failed to run git commit")
+
+proc gitCurrentBranch*(): string =
+  try:
+    let (output, code) = execCmdEx("git branch --show-current", options = {poUsePath})
+    if code == 0: return output.strip()
+    return ""
+  except OSError:
+    return ""
+
+proc getConflictFiles*(): seq[ConflictFile] =
+  ## Get list of files with merge conflicts (UU status).
+  try:
+    let (output, code) = execCmdEx("git status --porcelain", options = {poUsePath})
+    if code != 0: return @[]
+    for line in output.splitLines():
+      if line.len < 3: continue
+      # Both modified = UU, Added by both = AA, etc.
+      if line[0..1] in ["UU", "AA", "DU", "UD"]:
+        let path = line[3..^1]
+        # Count conflict markers
+        var count = 0
+        try:
+          let content = readFile(path)
+          for l in content.splitLines():
+            if l.startsWith("<<<<<<<"):
+              inc count
+        except IOError:
+          discard
+        result.add(ConflictFile(path: path, cursorIndex: 0, conflictCount: count))
+  except OSError:
+    return @[]
+
+proc resolveConflict*(path: string, choice: ConflictChoice, conflictIdx: int): bool =
+  ## Resolve a specific conflict in a file by choosing ours or theirs.
+  try:
+    var content = readFile(path)
+    var lines = content.splitLines()
+    var idx = 0
+    var startLine = -1
+    var midLine = -1
+    var endLine = -1
+    # Find the Nth conflict
+    for i in 0..<lines.len:
+      if lines[i].startsWith("<<<<<<<"):
+        if idx == conflictIdx:
+          startLine = i
+        inc idx
+      elif startLine >= 0 and midLine < 0 and lines[i].startsWith("======="):
+        midLine = i
+      elif startLine >= 0 and midLine >= 0 and lines[i].startsWith(">>>>>>>"):
+        endLine = i
+        break
+    if startLine < 0 or midLine < 0 or endLine < 0:
+      return false
+    var newLines: seq[string]
+    # Lines before conflict
+    for i in 0..<startLine:
+      newLines.add(lines[i])
+    # Chosen side
+    case choice
+    of ccOurs:
+      for i in (startLine + 1)..<midLine:
+        newLines.add(lines[i])
+    of ccTheirs:
+      for i in (midLine + 1)..<endLine:
+        newLines.add(lines[i])
+    # Lines after conflict
+    for i in (endLine + 1)..<lines.len:
+      newLines.add(lines[i])
+    writeFile(path, newLines.join("\n"))
+    return true
+  except IOError:
+    return false
+
 proc openGitPanel*(panel: var GitPanelState) =
   panel.visible = true
   panel.view = gvFiles
