@@ -231,7 +231,7 @@ proc gitBranches*(count: int = 40, skip: int = 0, query: string = ""): seq[strin
     var cmd = "git for-each-ref --count=" & $total & " '--format=%(refname:short)'"
     if query.len > 0:
       let pattern = "*" & query & "*"
-      cmd.add(" refs/heads/" & pattern & " refs/remotes/" & pattern)
+      cmd.add(" refs/heads/" & pattern & " refs/remotes/**/" & pattern)
     else:
       cmd.add(" refs/heads/")
     let (output, code) = execCmdEx(cmd, options = {poUsePath})
