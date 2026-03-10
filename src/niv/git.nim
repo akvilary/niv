@@ -228,7 +228,7 @@ proc gitBranches*(count: int = 40, skip: int = 0, query: string = ""): seq[strin
   ## Get branches with pagination and optional search via git for-each-ref.
   try:
     let total = skip + count
-    var cmd = "git for-each-ref --count=" & $total & " --format=%(refname:short)"
+    var cmd = "git for-each-ref --count=" & $total & " '--format=%(refname:short)'"
     if query.len > 0:
       let pattern = "*" & query & "*"
       cmd.add(" refs/heads/" & pattern & " refs/remotes/" & pattern)
