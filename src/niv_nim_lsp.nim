@@ -46,10 +46,17 @@ type
     endCol: int
     message: string
 
+  KnownSymbols = object
+    types: HashSet[string]
+    functions: HashSet[string]
+    enums: HashSet[string]
+    enumMembers: HashSet[string]
+
   DocumentState = object
     uri: string
     text: string
     version: int
+    known: KnownSymbols
 
 # Semantic token type indices (must match legend in initialize response)
 const
@@ -172,7 +179,8 @@ proc emitMultiLineTokens(tokens: var seq[NimToken], kind: NimTokenKind,
 # Nim Tokenizer (full file)
 # ---------------------------------------------------------------------------
 
-proc tokenizeNim(text: string, startLine: int = 0, endLine: int = int.high): (seq[NimToken], seq[DiagInfo]) =
+proc tokenizeNim(text: string, startLine: int = 0, endLine: int = int.high;
+                 known: KnownSymbols = default(KnownSymbols)): (seq[NimToken], seq[DiagInfo]) =
   var tokens: seq[NimToken]
   var diags: seq[DiagInfo]
 
@@ -528,13 +536,17 @@ proc tokenizeNim(text: string, startLine: int = 0, endLine: int = int.high): (se
         tokens.add(NimToken(kind: ntType, line: sLine, col: sCol, length: length))
       elif word in builtinFuncSet:
         tokens.add(NimToken(kind: ntBuiltinFunc, line: sLine, col: sCol, length: length))
+      elif word in enumMemberSet or word in known.enumMembers:
+        tokens.add(NimToken(kind: ntEnumMember, line: sLine, col: sCol, length: length))
+      elif word in known.enums or word in known.types:
+        tokens.add(NimToken(kind: ntType, line: sLine, col: sCol, length: length))
+      elif word in known.functions:
+        tokens.add(NimToken(kind: ntFunction, line: sLine, col: sCol, length: length))
       elif word[0] in {'A'..'Z'}:
         # Uppercase identifier — likely a type
         tokens.add(NimToken(kind: ntType, line: sLine, col: sCol, length: length))
       elif word == "result":
         tokens.add(NimToken(kind: ntResultVar, line: sLine, col: sCol, length: length))
-      elif word in enumMemberSet:
-        tokens.add(NimToken(kind: ntEnumMember, line: sLine, col: sCol, length: length))
       else:
         # Check if it's a function call: identifier followed by (
         var lookPos = pos
@@ -897,6 +909,191 @@ proc resolveNimModule(moduleName: string, fileDir: string): string =
   modulePathCache[moduleName] = ""
   return ""
 
+type NimSymbolKind = enum
+  nskType, nskEnum, nskFunction, nskEnumMember, nskUnknown
+
+proc parseNimFunctions(text: string): seq[string] =
+  ## Extract exported proc/func/iterator/converter names
+  let lines = text.split('\n')
+  for i in 0..<lines.len:
+    let stripped = lines[i].strip()
+    for kw in ["proc ", "func ", "iterator ", "converter "]:
+      if stripped.startsWith(kw):
+        let rest = stripped[kw.len..^1]
+        var nameEnd = 0
+        while nameEnd < rest.len and rest[nameEnd] in {'a'..'z', 'A'..'Z', '0'..'9', '_'}:
+          inc nameEnd
+        if nameEnd > 0:
+          result.add(rest[0..<nameEnd])
+        break
+
+proc parseNimEnumMembers(text: string, enumName: string): seq[string] =
+  ## Extract members of a specific enum type
+  let lines = text.split('\n')
+  for i in 0..<lines.len:
+    let stripped = lines[i].strip()
+    # Find: EnumName = enum or EnumName* = enum
+    let nameCheck = stripped.startsWith(enumName & " ") or
+                    stripped.startsWith(enumName & "*")
+    if nameCheck and stripped.contains("= enum"):
+      let indent = lines[i].len - stripped.len
+      let memberIndent = indent + 2
+      var j = i + 1
+      while j < lines.len:
+        let mLine = lines[j]
+        if mLine.strip().len == 0:
+          inc j; continue
+        var curIndent = 0
+        for c in mLine:
+          if c == ' ': inc curIndent
+          elif c == '\t': curIndent += 4
+          else: break
+        if curIndent < memberIndent: break
+        let mStripped = mLine.strip()
+        # Parse member name (before = or , or comment)
+        var nameEnd = 0
+        while nameEnd < mStripped.len and mStripped[nameEnd] in {'a'..'z', 'A'..'Z', '0'..'9', '_'}:
+          inc nameEnd
+        if nameEnd > 0:
+          result.add(mStripped[0..<nameEnd])
+        inc j
+      break
+
+proc parseNimEnumTypes(text: string): seq[string] =
+  ## Extract enum type names defined in text
+  let lines = text.split('\n')
+  for i in 0..<lines.len:
+    let stripped = lines[i].strip()
+    if stripped.contains("= enum"):
+      let eqIdx = stripped.find("= enum")
+      if eqIdx > 0:
+        let before = stripped[0..<eqIdx].strip()
+        let name = if before.endsWith("*"): before[0..^2].strip() else: before
+        if name.len > 0:
+          result.add(name)
+
+proc parseTypes(text: string): seq[TypeInfo] =
+  let lines = text.split('\n')
+  for i in 0..<lines.len:
+    let stripped = lines[i].strip()
+    # Look for: Name = object of Base, Name* = object of Base, Name = ref object of Base
+    var name = ""
+    var rest = ""
+    # Try to extract type name and rest
+    for pattern in ["= object of ", "= ref object of ", "= object", "= ref object"]:
+      let idx = stripped.find(pattern)
+      if idx > 0:
+        let beforeEq = stripped[0..<idx].strip()
+        name = if beforeEq.endsWith("*"): beforeEq[0..^2].strip()
+               else: beforeEq
+        if pattern.endsWith("of "):
+          rest = stripped[idx + pattern.len..^1].strip()
+          var parentEnd = 0
+          while parentEnd < rest.len and rest[parentEnd] in {'a'..'z', 'A'..'Z', '0'..'9', '_'}:
+            inc parentEnd
+          let parent = rest[0..<parentEnd]
+          if name.len > 0 and parent.len > 0:
+            let indent = lines[i].len - stripped.len
+            var bodyIndent = indent + 2
+            if i + 1 < lines.len:
+              let nextLine = lines[i + 1]
+              var nextIndent = 0
+              for c in nextLine:
+                if c == ' ': inc nextIndent
+                elif c == '\t': nextIndent += 4
+                else: break
+              if nextIndent > indent: bodyIndent = nextIndent
+            result.add(TypeInfo(name: name, parent: parent,
+                                bodyStartLine: i + 1, bodyIndent: bodyIndent))
+        elif name.len > 0:
+          let indent = lines[i].len - stripped.len
+          var bodyIndent = indent + 2
+          if i + 1 < lines.len:
+            let nextLine = lines[i + 1]
+            var nextIndent = 0
+            for c in nextLine:
+              if c == ' ': inc nextIndent
+              elif c == '\t': nextIndent += 4
+              else: break
+            if nextIndent > indent: bodyIndent = nextIndent
+          result.add(TypeInfo(name: name, parent: "",
+                              bodyStartLine: i + 1, bodyIndent: bodyIndent))
+        break
+
+proc classifySymbolInText(text: string, name: string): NimSymbolKind =
+  ## Determine what kind of symbol `name` is in the given source text
+  for e in parseNimEnumTypes(text):
+    if e == name: return nskEnum
+  for e in parseNimEnumTypes(text):
+    for m in parseNimEnumMembers(text, e):
+      if m == name: return nskEnumMember
+  for t in parseTypes(text):
+    if t.name == name: return nskType
+  for f in parseNimFunctions(text):
+    if f == name: return nskFunction
+  return nskUnknown
+
+proc addSymbolToKnown(known: var KnownSymbols, name: string, kind: NimSymbolKind) =
+  case kind
+  of nskType: known.types.incl(name)
+  of nskEnum:
+    known.types.incl(name)
+    known.enums.incl(name)
+  of nskFunction: known.functions.incl(name)
+  of nskEnumMember: known.enumMembers.incl(name)
+  of nskUnknown: discard
+
+var symbolCheckCache: Table[string, NimSymbolKind]
+
+proc findNimSymbolInModule(modulePath: string, name: string, fileDir: string, depth: int = 0): NimSymbolKind =
+  if depth > 5: return nskUnknown
+  let key = modulePath & ":" & name
+  if symbolCheckCache.hasKey(key):
+    return symbolCheckCache[key]
+  symbolCheckCache[key] = nskUnknown
+  var moduleText: string
+  try:
+    moduleText = readFile(modulePath)
+  except IOError:
+    return nskUnknown
+  let kind = classifySymbolInText(moduleText, name)
+  if kind != nskUnknown:
+    symbolCheckCache[key] = kind
+    return kind
+  # Check re-exports
+  let modDir = parentDir(modulePath)
+  for imp in parseNimImports(moduleText, modDir):
+    if imp.names.len > 0:
+      for n in imp.names:
+        if n == name:
+          let impPath = resolveNimModule(imp.module, modDir)
+          if impPath.len > 0:
+            let k = findNimSymbolInModule(impPath, name, modDir, depth + 1)
+            if k != nskUnknown:
+              symbolCheckCache[key] = k
+              return k
+  return nskUnknown
+
+proc collectKnownSymbols(text: string, filePath: string = ""): KnownSymbols =
+  let fileDir = if filePath.len > 0: parentDir(filePath) else: projectRoot
+  # Local definitions: classify all known names
+  for e in parseNimEnumTypes(text):
+    result.addSymbolToKnown(e, nskEnum)
+    for m in parseNimEnumMembers(text, e):
+      result.addSymbolToKnown(m, nskEnumMember)
+  for t in parseTypes(text):
+    result.addSymbolToKnown(t.name, nskType)
+  for f in parseNimFunctions(text):
+    result.addSymbolToKnown(f, nskFunction)
+  # Resolve from-imports
+  for imp in parseNimImports(text, fileDir):
+    let modulePath = resolveNimModule(imp.module, fileDir)
+    if modulePath.len == 0: continue
+    if imp.names.len > 0:
+      for name in imp.names:
+        let kind = findNimSymbolInModule(modulePath, name, fileDir)
+        result.addSymbolToKnown(name, kind)
+
 proc findDefinitionInText(text: string, word: string): (int, int) =
   let lines = text.split('\n')
   let patterns = [
@@ -953,55 +1150,6 @@ proc findDefinitionInText(text: string, word: string): (int, int) =
             if col >= 0:
               return (i, col)
   return (-1, -1)
-
-proc parseTypes(text: string): seq[TypeInfo] =
-  let lines = text.split('\n')
-  for i in 0..<lines.len:
-    let stripped = lines[i].strip()
-    # Look for: Name = object of Base, Name* = object of Base, Name = ref object of Base
-    var name = ""
-    var rest = ""
-    # Try to extract type name and rest
-    for pattern in ["= object of ", "= ref object of ", "= object", "= ref object"]:
-      let idx = stripped.find(pattern)
-      if idx > 0:
-        let beforeEq = stripped[0..<idx].strip()
-        name = if beforeEq.endsWith("*"): beforeEq[0..^2].strip()
-               else: beforeEq
-        if pattern.endsWith("of "):
-          rest = stripped[idx + pattern.len..^1].strip()
-          # Remove trailing : or other chars
-          var parentEnd = 0
-          while parentEnd < rest.len and rest[parentEnd] in {'a'..'z', 'A'..'Z', '0'..'9', '_'}:
-            inc parentEnd
-          let parent = rest[0..<parentEnd]
-          if name.len > 0 and parent.len > 0:
-            let indent = lines[i].len - stripped.len
-            var bodyIndent = indent + 2
-            if i + 1 < lines.len:
-              let nextLine = lines[i + 1]
-              var nextIndent = 0
-              for c in nextLine:
-                if c == ' ': inc nextIndent
-                elif c == '\t': nextIndent += 4
-                else: break
-              if nextIndent > indent: bodyIndent = nextIndent
-            result.add(TypeInfo(name: name, parent: parent,
-                                bodyStartLine: i + 1, bodyIndent: bodyIndent))
-        elif name.len > 0:
-          let indent = lines[i].len - stripped.len
-          var bodyIndent = indent + 2
-          if i + 1 < lines.len:
-            let nextLine = lines[i + 1]
-            var nextIndent = 0
-            for c in nextLine:
-              if c == ' ': inc nextIndent
-              elif c == '\t': nextIndent += 4
-              else: break
-            if nextIndent > indent: bodyIndent = nextIndent
-          result.add(TypeInfo(name: name, parent: "",
-                              bodyStartLine: i + 1, bodyIndent: bodyIndent))
-        break
 
 proc findMethodForType(text: string, typeName: string, methodName: string): (int, int) =
   let lines = text.split('\n')
@@ -1277,7 +1425,10 @@ proc main() =
       let uri = td["uri"].getStr()
       let text = td["text"].getStr()
       let version = td["version"].getInt()
-      documents[uri] = DocumentState(uri: uri, text: text, version: version)
+      var filePath = ""
+      if uri.startsWith("file://"): filePath = uri[7..^1]
+      let knsyms = collectKnownSymbols(text, filePath)
+      documents[uri] = DocumentState(uri: uri, text: text, version: version, known: knsyms)
 
     of "textDocument/didChange":
       let params = msg["params"]
@@ -1289,6 +1440,9 @@ proc main() =
         if uri in documents:
           documents[uri].text = newText
           documents[uri].version = version
+          var filePath = ""
+          if uri.startsWith("file://"): filePath = uri[7..^1]
+          documents[uri].known = collectKnownSymbols(newText, filePath)
 
     of "textDocument/didClose":
       let uri = msg["params"]["textDocument"]["uri"].getStr()
@@ -1297,7 +1451,8 @@ proc main() =
     of "textDocument/semanticTokens/full":
       let uri = msg["params"]["textDocument"]["uri"].getStr()
       let text = if uri in documents: documents[uri].text else: ""
-      let (tokens, _) = tokenizeNim(text)
+      let knsyms = if uri in documents: documents[uri].known else: default(KnownSymbols)
+      let (tokens, _) = tokenizeNim(text, known = knsyms)
       let data = encodeSemanticTokens(tokens)
       sendTokensResponse(id, data)
 
@@ -1308,7 +1463,8 @@ proc main() =
       let startLine = rangeNode["start"]["line"].getInt()
       let endLine = rangeNode["end"]["line"].getInt()
       let text = if uri in documents: documents[uri].text else: ""
-      let (tokens, _) = tokenizeNim(text, startLine, endLine)
+      let knsyms = if uri in documents: documents[uri].known else: default(KnownSymbols)
+      let (tokens, _) = tokenizeNim(text, startLine, endLine, knsyms)
       let data = encodeSemanticTokens(tokens)
       sendTokensResponse(id, data)
 
