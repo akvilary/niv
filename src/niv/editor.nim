@@ -177,7 +177,7 @@ proc handleLspEvents(state: var EditorState): bool =
                   startBgHighlight(state.buffer.lineCount)
 
             state.cursor = Position(line: line, col: col)
-            state.viewport.topLine = 0
+            state.viewport.topLine = max(0, line - 5)
             state.viewport.leftCol = 0
             state.statusMessage = ""
           else:
