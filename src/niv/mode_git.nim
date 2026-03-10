@@ -5,6 +5,16 @@ import types
 import buffer
 import git
 
+const logBatchSize = 40
+
+proc loadMoreLog(panel: var GitPanelState) =
+  if not panel.logHasMore: return
+  let more = gitLog(logBatchSize, panel.logLoadedCount)
+  panel.logEntries.add(more)
+  panel.logLoadedCount += more.len
+  if more.len < logBatchSize:
+    panel.logHasMore = false
+
 proc enterCommitInput*(state: var EditorState) =
   ## Save current buffer/cursor, create empty buffer for commit message
   var hasStaged = false
@@ -139,7 +149,9 @@ proc handleFilesView(state: var EditorState, key: InputKey) =
     of Rune(ord('c')):
       enterCommitInput(state)
     of Rune(ord('l')):
-      state.gitPanel.logEntries = gitLog()
+      state.gitPanel.logEntries = gitLog(logBatchSize)
+      state.gitPanel.logLoadedCount = state.gitPanel.logEntries.len
+      state.gitPanel.logHasMore = state.gitPanel.logEntries.len >= logBatchSize
       state.gitPanel.logCursorIndex = 0
       state.gitPanel.logScrollOffset = 0
       state.gitPanel.view = gvLog
@@ -225,6 +237,8 @@ proc handleLogView(state: var EditorState, key: InputKey) =
     of Rune(ord('j')):
       if state.gitPanel.logEntries.len > 0 and state.gitPanel.logCursorIndex < state.gitPanel.logEntries.len - 1:
         inc state.gitPanel.logCursorIndex
+      elif state.gitPanel.logCursorIndex == state.gitPanel.logEntries.len - 1:
+        loadMoreLog(state.gitPanel)
     of Rune(ord('k')):
       if state.gitPanel.logCursorIndex > 0:
         dec state.gitPanel.logCursorIndex
@@ -243,6 +257,8 @@ proc handleLogView(state: var EditorState, key: InputKey) =
   of kkArrowDown:
     if state.gitPanel.logEntries.len > 0 and state.gitPanel.logCursorIndex < state.gitPanel.logEntries.len - 1:
       inc state.gitPanel.logCursorIndex
+    elif state.gitPanel.logCursorIndex == state.gitPanel.logEntries.len - 1:
+      loadMoreLog(state.gitPanel)
   of kkArrowUp:
     if state.gitPanel.logCursorIndex > 0:
       dec state.gitPanel.logCursorIndex

@@ -81,9 +81,28 @@ proc gitCommit*(message: string): (bool, string) =
   except OSError:
     return (false, "Failed to run git commit")
 
-proc gitLog*(count: int = 30): seq[GitLogEntry] =
+proc openGitPanel*(panel: var GitPanelState) =
+  panel.visible = true
+  panel.view = gvFiles
+  panel.cursorIndex = 0
+  panel.scrollOffset = 0
+  panel.diffLines = @[]
+  panel.diffScrollOffset = 0
+  panel.logEntries = @[]
+  panel.logCursorIndex = 0
+  panel.logScrollOffset = 0
+  panel.logHasMore = false
+  panel.logLoadedCount = 0
+  panel.inCommitInput = false
+  panel.confirmDiscard = false
+  panel.files = gitGetStatus()
+
+proc gitLog*(count: int = 40, skip: int = 0): seq[GitLogEntry] =
   try:
-    let (output, code) = execCmdEx("git log --oneline -" & $count, options = {poUsePath})
+    var cmd = "git log --oneline -" & $count
+    if skip > 0:
+      cmd.add(" --skip=" & $skip)
+    let (output, code) = execCmdEx(cmd, options = {poUsePath})
     if code != 0:
       return @[]
     for line in output.splitLines():
@@ -244,20 +263,6 @@ proc gitCheckout*(branch: string): (bool, string) =
     return (code == 0, output.strip())
   except OSError:
     return (false, "Failed to run git checkout")
-
-proc openGitPanel*(panel: var GitPanelState) =
-  panel.visible = true
-  panel.view = gvFiles
-  panel.cursorIndex = 0
-  panel.scrollOffset = 0
-  panel.diffLines = @[]
-  panel.diffScrollOffset = 0
-  panel.logEntries = @[]
-  panel.logCursorIndex = 0
-  panel.logScrollOffset = 0
-  panel.inCommitInput = false
-  panel.confirmDiscard = false
-  panel.files = gitGetStatus()
 
 proc closeGitPanel*(panel: var GitPanelState) =
   panel.visible = false

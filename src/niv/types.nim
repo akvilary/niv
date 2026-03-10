@@ -161,6 +161,8 @@ type
     branchCursorIndex*: int
     branchDirectOpen*: bool        # opened via Ctrl+b from normal mode
     branchScrollOffset*: int
+    logHasMore*: bool
+    logLoadedCount*: int
     savedBuffer*: Buffer
     savedCursor*: Position
     savedTopLine*: int
