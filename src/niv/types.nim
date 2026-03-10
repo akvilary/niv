@@ -163,6 +163,8 @@ type
     branchScrollOffset*: int
     logHasMore*: bool
     logLoadedCount*: int
+    branchHasMore*: bool
+    branchLoadedCount*: int
     savedBuffer*: Buffer
     savedCursor*: Position
     savedTopLine*: int

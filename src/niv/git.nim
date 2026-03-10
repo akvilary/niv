@@ -93,6 +93,8 @@ proc openGitPanel*(panel: var GitPanelState) =
   panel.logScrollOffset = 0
   panel.logHasMore = false
   panel.logLoadedCount = 0
+  panel.branchHasMore = false
+  panel.branchLoadedCount = 0
   panel.inCommitInput = false
   panel.confirmDiscard = false
   panel.files = gitGetStatus()
@@ -222,17 +224,25 @@ proc resolveConflict*(path: string, choice: ConflictChoice, conflictIdx: int): b
   except IOError:
     return false
 
-proc gitBranches*(): seq[string] =
-  ## Get all branches sorted by most recent committerdate (descending).
+proc gitBranches*(count: int = 40, skip: int = 0, query: string = ""): seq[string] =
+  ## Get branches with pagination and optional search via git for-each-ref.
   try:
-    let (output, code) = execCmdEx(
-      "git branch -a --sort=-committerdate --format='%(refname:short)'",
-      options = {poUsePath})
+    let total = skip + count
+    var cmd = "git for-each-ref --count=" & $total & " --format=%(refname:short)"
+    if query.len > 0:
+      let pattern = "*" & query & "*"
+      cmd.add(" refs/heads/" & pattern & " refs/remotes/" & pattern)
+    else:
+      cmd.add(" refs/heads/ refs/remotes/")
+    let (output, code) = execCmdEx(cmd, options = {poUsePath})
     if code != 0: return @[]
+    var idx = 0
     for line in output.splitLines():
       let name = line.strip()
       if name.len > 0:
-        result.add(name)
+        if idx >= skip:
+          result.add(name)
+        inc idx
   except OSError:
     return @[]
 

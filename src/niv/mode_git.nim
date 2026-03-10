@@ -1,19 +1,34 @@
 ## Git mode key handler
 
-import std/[strutils, unicode, sequtils]
+import std/[strutils, unicode]
 import types
 import buffer
 import git
 
-const logBatchSize = 40
+const batchSize = 40
 
 proc loadMoreLog(panel: var GitPanelState) =
   if not panel.logHasMore: return
-  let more = gitLog(logBatchSize, panel.logLoadedCount)
+  let more = gitLog(batchSize, panel.logLoadedCount)
   panel.logEntries.add(more)
   panel.logLoadedCount += more.len
-  if more.len < logBatchSize:
+  if more.len < batchSize:
     panel.logHasMore = false
+
+proc loadMoreBranches(panel: var GitPanelState) =
+  if not panel.branchHasMore: return
+  let more = gitBranches(batchSize, panel.branchLoadedCount, panel.branchQuery)
+  panel.filteredBranches.add(more)
+  panel.branchLoadedCount += more.len
+  if more.len < batchSize:
+    panel.branchHasMore = false
+
+proc filterBranches*(panel: var GitPanelState) =
+  panel.filteredBranches = gitBranches(batchSize, query = panel.branchQuery)
+  panel.branchLoadedCount = panel.filteredBranches.len
+  panel.branchHasMore = panel.filteredBranches.len >= batchSize
+  panel.branchCursorIndex = 0
+  panel.branchScrollOffset = 0
 
 proc enterCommitInput*(state: var EditorState) =
   ## Save current buffer/cursor, create empty buffer for commit message
@@ -149,20 +164,17 @@ proc handleFilesView(state: var EditorState, key: InputKey) =
     of Rune(ord('c')):
       enterCommitInput(state)
     of Rune(ord('l')):
-      state.gitPanel.logEntries = gitLog(logBatchSize)
+      state.gitPanel.logEntries = gitLog(batchSize)
       state.gitPanel.logLoadedCount = state.gitPanel.logEntries.len
-      state.gitPanel.logHasMore = state.gitPanel.logEntries.len >= logBatchSize
+      state.gitPanel.logHasMore = state.gitPanel.logEntries.len >= batchSize
       state.gitPanel.logCursorIndex = 0
       state.gitPanel.logScrollOffset = 0
       state.gitPanel.view = gvLog
     of Rune(ord('m')):
       enterMergeInput(state)
     of Rune(ord('b')):
-      state.gitPanel.branches = gitBranches()
       state.gitPanel.branchQuery = ""
-      state.gitPanel.filteredBranches = state.gitPanel.branches
-      state.gitPanel.branchCursorIndex = 0
-      state.gitPanel.branchScrollOffset = 0
+      filterBranches(state.gitPanel)
       state.gitPanel.view = gvBranches
     of Rune(ord('r')):
       refreshGitFiles(state.gitPanel)
@@ -266,16 +278,6 @@ proc handleLogView(state: var EditorState, key: InputKey) =
   else:
     discard
 
-proc filterBranches(state: var EditorState) =
-  let query = state.gitPanel.branchQuery.toLowerAscii()
-  if query.len == 0:
-    state.gitPanel.filteredBranches = state.gitPanel.branches
-  else:
-    state.gitPanel.filteredBranches = state.gitPanel.branches.filterIt(
-      query in it.toLowerAscii())
-  state.gitPanel.branchCursorIndex = 0
-  state.gitPanel.branchScrollOffset = 0
-
 proc closeBranchesView(state: var EditorState) =
   if state.gitPanel.branchDirectOpen:
     state.gitPanel.branchDirectOpen = false
@@ -294,12 +296,12 @@ proc handleBranchesView(state: var EditorState, key: InputKey) =
 
   of kkChar:
     state.gitPanel.branchQuery.add($key.ch)
-    filterBranches(state)
+    filterBranches(state.gitPanel)
 
   of kkBackspace:
     if state.gitPanel.branchQuery.len > 0:
       state.gitPanel.branchQuery = state.gitPanel.branchQuery[0..^2]
-      filterBranches(state)
+      filterBranches(state.gitPanel)
 
   of kkEnter:
     if state.gitPanel.branchCursorIndex < branchCount:
@@ -322,8 +324,7 @@ proc handleBranchesView(state: var EditorState, key: InputKey) =
       state.statusMessage = "Fetching..."
       let (ok, _) = gitFetch()
       if ok:
-        state.gitPanel.branches = gitBranches()
-        filterBranches(state)
+        filterBranches(state.gitPanel)
         state.statusMessage = "Fetched"
       else:
         state.statusMessage = "Fetch failed"
@@ -332,8 +333,7 @@ proc handleBranchesView(state: var EditorState, key: InputKey) =
       let (ok, output) = gitPull()
       if ok:
         state.statusMessage = "Pulled"
-        state.gitPanel.branches = gitBranches()
-        filterBranches(state)
+        filterBranches(state.gitPanel)
         refreshGitFiles(state.gitPanel)
       else:
         state.statusMessage = "Pull failed: " & output
@@ -348,6 +348,10 @@ proc handleBranchesView(state: var EditorState, key: InputKey) =
   of kkArrowDown:
     if branchCount > 0 and state.gitPanel.branchCursorIndex < branchCount - 1:
       inc state.gitPanel.branchCursorIndex
+    elif state.gitPanel.branchCursorIndex == branchCount - 1 and state.gitPanel.branchHasMore:
+      loadMoreBranches(state.gitPanel)
+      if state.gitPanel.filteredBranches.len > branchCount:
+        inc state.gitPanel.branchCursorIndex
   of kkArrowUp:
     if state.gitPanel.branchCursorIndex > 0:
       dec state.gitPanel.branchCursorIndex
