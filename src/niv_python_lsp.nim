@@ -53,6 +53,7 @@ type
     text: string
     version: int
     knownTypes: HashSet[string]
+    knownFunctions: HashSet[string]
 
 # Semantic token type indices (must match legend in initialize response)
 const
@@ -180,7 +181,8 @@ proc emitStringTokens(tokens: var seq[PythonToken], text: string,
 # ---------------------------------------------------------------------------
 
 proc tokenizePython(text: string, startLine: int = 0, endLine: int = int.high;
-                    knownTypes: HashSet[string] = default(HashSet[string])): (seq[PythonToken], seq[DiagInfo]) =
+                    knownTypes: HashSet[string] = default(HashSet[string]);
+                    knownFunctions: HashSet[string] = default(HashSet[string])): (seq[PythonToken], seq[DiagInfo]) =
   var tokens: seq[PythonToken]
   var diags: seq[DiagInfo]
   var pos = 0
@@ -441,6 +443,8 @@ proc tokenizePython(text: string, startLine: int = 0, endLine: int = int.high;
           tokens.add(PythonToken(kind: ptSelfParam, line: sLine, col: sCol, length: length))
         elif word in knownTypes:
           tokens.add(PythonToken(kind: ptType, line: sLine, col: sCol, length: length))
+        elif word in knownFunctions:
+          tokens.add(PythonToken(kind: ptFunction, line: sLine, col: sCol, length: length))
         else:
           # Lookahead: identifier followed by '(' → function call
           var lookPos = pos
@@ -532,11 +536,7 @@ proc tokenizePython(text: string, startLine: int = 0, endLine: int = int.high;
       let sLine = line
       let sCol = col
       advance()
-      var length = 1
-      while pos < text.len and (isIdentChar(text[pos]) or text[pos] == '.'):
-        advance(); inc length
-      if length > 1:
-        tokens.add(PythonToken(kind: ptDecorator, line: sLine, col: sCol, length: length))
+      tokens.add(PythonToken(kind: ptDecorator, line: sLine, col: sCol, length: 1))
 
     # Parentheses (track function definition params and call depth)
     of '(':
@@ -1024,50 +1024,83 @@ proc isPascalCase(s: string): bool =
     if s[i] in {'a'..'z'}: return true
   return false
 
-var classCheckCache: Table[string, bool]
+proc parseFunctions(text: string): seq[string] =
+  ## Extract top-level function names (def at zero indentation)
+  let lines = text.split('\n')
+  for i in 0..<lines.len:
+    let stripped = lines[i].strip()
+    if stripped.startsWith("def "):
+      let indent = lines[i].len - stripped.len
+      if indent == 0:
+        var rest = stripped[4..^1]
+        var nameEnd = 0
+        while nameEnd < rest.len and rest[nameEnd] in {'a'..'z', 'A'..'Z', '0'..'9', '_'}:
+          inc nameEnd
+        if nameEnd > 0:
+          result.add(rest[0..<nameEnd])
 
-proc isClassInModule(modulePath: string, name: string, depth: int = 0): bool =
-  ## Check if `name` is a class defined or re-exported in the module.
+type SymbolKind = enum
+  skClass, skFunction, skUnknown
+
+var symbolCheckCache: Table[string, SymbolKind]
+
+proc findSymbolInModule(modulePath: string, name: string, depth: int = 0): SymbolKind =
+  ## Check if `name` is a class or function defined or re-exported in the module.
   ## Follows import chains up to depth 5.
-  if depth > 5: return false
+  if depth > 5: return skUnknown
   let key = modulePath & ":" & name
-  if classCheckCache.hasKey(key):
-    return classCheckCache[key]
-  classCheckCache[key] = false  # prevent cycles
+  if symbolCheckCache.hasKey(key):
+    return symbolCheckCache[key]
+  symbolCheckCache[key] = skUnknown  # prevent cycles
   var moduleText: string
   try:
     moduleText = readFile(modulePath)
   except IOError:
-    return false
-  # Check local class definitions
+    return skUnknown
   for c in parseClasses(moduleText):
     if c.name == name:
-      classCheckCache[key] = true
-      return true
+      symbolCheckCache[key] = skClass
+      return skClass
+  for f in parseFunctions(moduleText):
+    if f == name:
+      symbolCheckCache[key] = skFunction
+      return skFunction
   # Check imports in this module for re-exports
   let pkgDir = parentDir(modulePath)
   for imp in parseImports(moduleText, pkgDir):
     if imp.name == name:
       let impPath = resolveModulePath(imp.module)
-      if impPath.len > 0 and isClassInModule(impPath, name, depth + 1):
-        classCheckCache[key] = true
-        return true
-  return false
+      if impPath.len > 0:
+        let kind = findSymbolInModule(impPath, name, depth + 1)
+        if kind != skUnknown:
+          symbolCheckCache[key] = kind
+          return kind
+  return skUnknown
 
-proc collectKnownTypes*(text: string, filePath: string = ""): HashSet[string] =
-  ## Collect known type names: local class defs + resolved imported classes
+proc collectKnownSymbols*(text: string, filePath: string = ""): (HashSet[string], HashSet[string]) =
+  ## Returns (knownTypes, knownFunctions)
+  var knownTypes: HashSet[string]
+  var knownFunctions: HashSet[string]
   for c in parseClasses(text):
-    result.incl(c.name)
+    knownTypes.incl(c.name)
+  for f in parseFunctions(text):
+    knownFunctions.incl(f)
   let packageDir = if filePath.len > 0: parentDir(filePath) else: ""
   for imp in parseImports(text, packageDir):
     if imp.name.len == 0: continue
     let target = if imp.alias.len > 0: imp.alias else: imp.name
     let modulePath = resolveModulePath(imp.module)
     if modulePath.len > 0:
-      if isClassInModule(modulePath, imp.name):
-        result.incl(target)
+      let kind = findSymbolInModule(modulePath, imp.name)
+      case kind
+      of skClass: knownTypes.incl(target)
+      of skFunction: knownFunctions.incl(target)
+      of skUnknown:
+        if isPascalCase(imp.name):
+          knownTypes.incl(target)
     elif isPascalCase(imp.name):
-      result.incl(target)
+      knownTypes.incl(target)
+  return (knownTypes, knownFunctions)
 
 proc findDefinitionInText(text: string, word: string): (int, int) =
   ## Find `def word` or `class word` in text. Returns (line, col) or (-1, -1).
@@ -1349,8 +1382,8 @@ proc main() =
       let version = td["version"].getInt()
       var filePath = ""
       if uri.startsWith("file://"): filePath = uri[7..^1]
-      let kt = collectKnownTypes(text, filePath)
-      documents[uri] = DocumentState(uri: uri, text: text, version: version, knownTypes: kt)
+      let (kt, kf) = collectKnownSymbols(text, filePath)
+      documents[uri] = DocumentState(uri: uri, text: text, version: version, knownTypes: kt, knownFunctions: kf)
       if text.len < 1_000_000:
         publishDiagnostics(uri, text)
 
@@ -1366,7 +1399,9 @@ proc main() =
           documents[uri].version = version
           var filePath = ""
           if uri.startsWith("file://"): filePath = uri[7..^1]
-          documents[uri].knownTypes = collectKnownTypes(newText, filePath)
+          let (kt, kf) = collectKnownSymbols(newText, filePath)
+          documents[uri].knownTypes = kt
+          documents[uri].knownFunctions = kf
           if newText.len < 1_000_000:
             publishDiagnostics(uri, newText)
 
@@ -1378,7 +1413,8 @@ proc main() =
       let uri = msg["params"]["textDocument"]["uri"].getStr()
       let text = if uri in documents: documents[uri].text else: ""
       let kt = if uri in documents: documents[uri].knownTypes else: initHashSet[string]()
-      let (tokens, _) = tokenizePython(text, knownTypes = kt)
+      let kf = if uri in documents: documents[uri].knownFunctions else: initHashSet[string]()
+      let (tokens, _) = tokenizePython(text, knownTypes = kt, knownFunctions = kf)
       let data = encodeSemanticTokens(tokens)
       sendTokensResponse(id, data)
 
@@ -1390,7 +1426,8 @@ proc main() =
       let endLine = rangeNode["end"]["line"].getInt()
       let text = if uri in documents: documents[uri].text else: ""
       let kt = if uri in documents: documents[uri].knownTypes else: initHashSet[string]()
-      let (tokens, _) = tokenizePython(text, startLine, endLine, kt)
+      let kf = if uri in documents: documents[uri].knownFunctions else: initHashSet[string]()
+      let (tokens, _) = tokenizePython(text, startLine, endLine, kt, kf)
       let data = encodeSemanticTokens(tokens)
       sendTokensResponse(id, data)
 
