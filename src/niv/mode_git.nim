@@ -260,13 +260,21 @@ proc filterBranches(state: var EditorState) =
   state.gitPanel.branchCursorIndex = 0
   state.gitPanel.branchScrollOffset = 0
 
+proc closeBranchesView(state: var EditorState) =
+  if state.gitPanel.branchDirectOpen:
+    state.gitPanel.branchDirectOpen = false
+    closeGitPanel(state.gitPanel)
+    state.mode = mNormal
+  else:
+    state.gitPanel.view = gvFiles
+  state.statusMessage = ""
+
 proc handleBranchesView(state: var EditorState, key: InputKey) =
   let branchCount = state.gitPanel.filteredBranches.len
 
   case key.kind
   of kkEscape:
-    state.gitPanel.view = gvFiles
-    state.statusMessage = ""
+    closeBranchesView(state)
 
   of kkChar:
     state.gitPanel.branchQuery.add($key.ch)
@@ -283,8 +291,13 @@ proc handleBranchesView(state: var EditorState, key: InputKey) =
       let (ok, output) = gitCheckout(branch)
       if ok:
         state.statusMessage = "Switched to " & branch
-        refreshGitFiles(state.gitPanel)
-        state.gitPanel.view = gvFiles
+        if state.gitPanel.branchDirectOpen:
+          state.gitPanel.branchDirectOpen = false
+          closeGitPanel(state.gitPanel)
+          state.mode = mNormal
+        else:
+          refreshGitFiles(state.gitPanel)
+          state.gitPanel.view = gvFiles
       else:
         state.statusMessage = "Checkout failed: " & output
 

@@ -159,6 +159,7 @@ type
     filteredBranches*: seq[string] # filtered by search query
     branchQuery*: string           # search input
     branchCursorIndex*: int
+    branchDirectOpen*: bool        # opened via Ctrl+b from normal mode
     branchScrollOffset*: int
     savedBuffer*: Buffer
     savedCursor*: Position
