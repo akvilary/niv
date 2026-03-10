@@ -829,15 +829,34 @@ proc parseImports(text: string, packageDir: string = ""): seq[ImportInfo] =
         for _ in 1..<dots: baseDir = parentDir(baseDir)
         let relName = module[dots..^1].strip()
         if relName.len > 0:
-          let asFile = baseDir / relName & ".py"
+          let relPath = relName.replace(".", "/")
+          let asFile = baseDir / relPath & ".py"
           if fileExists(asFile): module = asFile
           else:
-            let asPackage = baseDir / relName / "__init__.py"
+            let asPackage = baseDir / relPath / "__init__.py"
             if fileExists(asPackage): module = asPackage
             else: continue
         else:
-          module = baseDir / "__init__.py"
-          if not fileExists(module): continue
+          # from . import name — name could be a submodule file
+          let names = rest[importIdx + 8..^1].strip()
+          for part in names.split(','):
+            let trimmed = part.strip()
+            if trimmed.len == 0: continue
+            let asParts = trimmed.split(" as ")
+            let name = asParts[0].strip()
+            let alias = if asParts.len > 1: asParts[1].strip() else: ""
+            let subFile = baseDir / name & ".py"
+            let subPkg = baseDir / name / "__init__.py"
+            if fileExists(subFile):
+              result.add(ImportInfo(module: subFile, name: name, alias: alias))
+            elif fileExists(subPkg):
+              result.add(ImportInfo(module: subPkg, name: name, alias: alias))
+            else:
+              # Might be a name in __init__.py
+              let initFile = baseDir / "__init__.py"
+              if fileExists(initFile):
+                result.add(ImportInfo(module: initFile, name: name, alias: alias))
+          continue
       elif module.startsWith("."):
         continue
       let names = rest[importIdx + 8..^1].strip()
