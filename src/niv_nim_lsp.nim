@@ -842,17 +842,21 @@ proc parseNimImports(text: string, fileDir: string): seq[ImportInfo] =
     inc i
 
 proc resolveNimModule(moduleName: string, fileDir: string): string =
-  if modulePathCache.hasKey(moduleName):
-    return modulePathCache[moduleName]
+  # Relative imports need fileDir in cache key
+  let cacheKey = if moduleName.startsWith("./") or moduleName.startsWith("../"):
+                   normalizedPath(fileDir / moduleName)
+                 else: moduleName
+  if modulePathCache.hasKey(cacheKey):
+    return modulePathCache[cacheKey]
 
   # 1. Relative imports (./xxx, ../xxx)
   if moduleName.startsWith("./") or moduleName.startsWith("../"):
     let resolved = fileDir / moduleName & ".nim"
     let normalized = normalizedPath(resolved)
     if fileExists(normalized):
-      modulePathCache[moduleName] = normalized
+      modulePathCache[cacheKey] = normalized
       return normalized
-    modulePathCache[moduleName] = ""
+    modulePathCache[cacheKey] = ""
     return ""
 
   # 2. std/ prefix — search in nimlib
@@ -863,9 +867,9 @@ proc resolveNimModule(moduleName: string, fileDir: string): string =
         let path = if subdir.len > 0: nimLibPath / subdir / name & ".nim"
                    else: nimLibPath / name & ".nim"
         if fileExists(path):
-          modulePathCache[moduleName] = path
+          modulePathCache[cacheKey] = path
           return path
-    modulePathCache[moduleName] = ""
+    modulePathCache[cacheKey] = ""
     return ""
 
   # 3. Local module — search in file's directory and project
@@ -873,18 +877,18 @@ proc resolveNimModule(moduleName: string, fileDir: string): string =
   # a. Same directory
   let localPath = fileDir / parts & ".nim"
   if fileExists(localPath):
-    modulePathCache[moduleName] = localPath
+    modulePathCache[cacheKey] = localPath
     return localPath
   # b. Project src directory
   if projectRoot.len > 0:
     let srcPath = projectRoot / "src" / parts & ".nim"
     if fileExists(srcPath):
-      modulePathCache[moduleName] = srcPath
+      modulePathCache[cacheKey] = srcPath
       return srcPath
     # Package structure: src/pkgname/module.nim
     let srcPath2 = projectRoot / "src" / projectRoot.lastPathPart / parts & ".nim"
     if fileExists(srcPath2):
-      modulePathCache[moduleName] = srcPath2
+      modulePathCache[cacheKey] = srcPath2
       return srcPath2
   # c. Nimlib (non-std imports like "os", "json")
   if nimLibPath.len > 0:
@@ -892,21 +896,21 @@ proc resolveNimModule(moduleName: string, fileDir: string): string =
       let path = if subdir.len > 0: nimLibPath / subdir / parts & ".nim"
                  else: nimLibPath / parts & ".nim"
       if fileExists(path):
-        modulePathCache[moduleName] = path
+        modulePathCache[cacheKey] = path
         return path
   # d. Nimble packages
   for searchPath in nimSearchPaths:
     let path = searchPath / parts & ".nim"
     if fileExists(path):
-      modulePathCache[moduleName] = path
+      modulePathCache[cacheKey] = path
       return path
     # Package: searchPath/name/name.nim
     let pkgPath = searchPath / parts / parts.lastPathPart & ".nim"
     if fileExists(pkgPath):
-      modulePathCache[moduleName] = pkgPath
+      modulePathCache[cacheKey] = pkgPath
       return pkgPath
 
-  modulePathCache[moduleName] = ""
+  modulePathCache[cacheKey] = ""
   return ""
 
 type NimSymbolKind = enum
