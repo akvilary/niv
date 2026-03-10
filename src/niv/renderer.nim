@@ -577,7 +577,7 @@ proc renderGitPanel(state: EditorState, startRow, panelHeight, totalWidth: int) 
 
   of gvBranches:
     let contentRows = panelHeight - 3  # separator, search line, help line
-    let helpLine = " Enter:checkout  Esc:back  \xe2\x86\x91\xe2\x86\x93:navigate"
+    let helpLine = " Enter:checkout  Ctrl+f:fetch  Ctrl+l:pull  Ctrl+p:push  Esc:back  \xe2\x86\x91\xe2\x86\x93:navigate"
 
     # Search input line
     moveCursor(startRow + 1, 1)

@@ -217,6 +217,27 @@ proc gitBranches*(): seq[string] =
   except OSError:
     return @[]
 
+proc gitFetch*(): (bool, string) =
+  try:
+    let (output, code) = execCmdEx("git fetch --prune", options = {poUsePath})
+    return (code == 0, output.strip())
+  except OSError:
+    return (false, "Failed to run git fetch")
+
+proc gitPull*(): (bool, string) =
+  try:
+    let (output, code) = execCmdEx("git pull", options = {poUsePath})
+    return (code == 0, output.strip())
+  except OSError:
+    return (false, "Failed to run git pull")
+
+proc gitPush*(): (bool, string) =
+  try:
+    let (output, code) = execCmdEx("git push", options = {poUsePath})
+    return (code == 0, output.strip())
+  except OSError:
+    return (false, "Failed to run git push")
+
 proc gitCheckout*(branch: string): (bool, string) =
   try:
     let (output, code) = execCmdEx("git checkout " & quoteShell(branch), options = {poUsePath})

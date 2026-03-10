@@ -269,7 +269,6 @@ proc handleBranchesView(state: var EditorState, key: InputKey) =
     state.statusMessage = ""
 
   of kkChar:
-    # All chars go to search input
     state.gitPanel.branchQuery.add($key.ch)
     filterBranches(state)
 
@@ -288,6 +287,34 @@ proc handleBranchesView(state: var EditorState, key: InputKey) =
         state.gitPanel.view = gvFiles
       else:
         state.statusMessage = "Checkout failed: " & output
+
+  of kkCtrlKey:
+    if key.ctrl == Rune(ord('f')):
+      state.statusMessage = "Fetching..."
+      let (ok, _) = gitFetch()
+      if ok:
+        state.gitPanel.branches = gitBranches()
+        filterBranches(state)
+        state.statusMessage = "Fetched"
+      else:
+        state.statusMessage = "Fetch failed"
+    elif key.ctrl == Rune(ord('l')):
+      state.statusMessage = "Pulling..."
+      let (ok, output) = gitPull()
+      if ok:
+        state.statusMessage = "Pulled"
+        state.gitPanel.branches = gitBranches()
+        filterBranches(state)
+        refreshGitFiles(state.gitPanel)
+      else:
+        state.statusMessage = "Pull failed: " & output
+    elif key.ctrl == Rune(ord('p')):
+      state.statusMessage = "Pushing..."
+      let (ok, output) = gitPush()
+      if ok:
+        state.statusMessage = "Pushed"
+      else:
+        state.statusMessage = "Push failed: " & output
 
   of kkArrowDown:
     if branchCount > 0 and state.gitPanel.branchCursorIndex < branchCount - 1:
