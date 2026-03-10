@@ -310,6 +310,7 @@ proc handleBranchesView(state: var EditorState, key: InputKey) =
         branch = branch[7..^1]
       let (ok, output) = gitCheckout(branch)
       if ok:
+        state.gitBranch = branch
         state.statusMessage = "Switched to " & branch
         if state.gitPanel.branchDirectOpen:
           state.gitPanel.branchDirectOpen = false
