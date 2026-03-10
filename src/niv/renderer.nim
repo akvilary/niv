@@ -49,6 +49,7 @@ proc renderSidebar(state: EditorState, editorRows: int) =
   setThemeColors()
 
   # Tree entries
+  let hScroll = sb.horizontalScroll
   for row in 1..<visibleRows:
     moveCursor(row + 1, 1)
     let idx = sb.scrollOffset + row - 1
@@ -66,52 +67,56 @@ proc renderSidebar(state: EditorState, editorRows: int) =
       if idx == sb.cursorIndex and sb.focused:
         setColorBg(colCursorLn)
 
-      let prefix = indent & icon
-      let truncated = if label.len > w: label[0..<w] else: label
-      let prefixLen = prefix.len
+      let startPos = min(hScroll, label.len)
+      let prefixLen = indent.len + icon.len
+      let dotIdx = node.name.rfind('.')
+      let extStart = if dotIdx > 0: prefixLen + dotIdx else: label.len
+
+      var pos = startPos
+      var written = 0
 
       let inPath = isPathSaved(node.path)
       if inPath:
         setColorFg(colCyan)
-        stdout.write(truncated)
+        if pos < label.len:
+          stdout.write(label[pos..^1])
+          written = label.len - pos
       elif node.kind == fnkDirectory:
         setColorFg(colBlue)
-        stdout.write(truncated)
+        if pos < label.len:
+          stdout.write(label[pos..^1])
+          written = label.len - pos
       else:
-        if prefixLen <= truncated.len:
+        # Prefix region
+        if pos < prefixLen:
           setColorFg(colFg)
-          stdout.write(truncated[0..<prefixLen])
-          let namepart = truncated[prefixLen..^1]
-          let dotIdx = node.name.rfind('.')
-          if dotIdx > 0 and prefixLen + dotIdx <= truncated.len:
-            let baseName = namepart[0..<dotIdx]
-            let ext = namepart[dotIdx..^1]
+          let regionEnd = min(prefixLen, label.len)
+          stdout.write(label[pos..<regionEnd])
+          written += regionEnd - pos
+          pos = regionEnd
+        # BaseName region
+        if pos < extStart and pos < label.len:
+          if dotIdx > 0:
             setColorFg(colFg)
-            stdout.write(baseName)
-            setColorFg(colTeal)
-            stdout.write(ext)
           else:
             setColorFg(colComment)
-            stdout.write(namepart)
-        else:
-          setColorFg(colComment)
-          stdout.write(truncated)
+          stdout.write(label[pos..<extStart])
+          written += extStart - pos
+          pos = extStart
+        # Extension region
+        if dotIdx > 0 and pos < label.len:
+          setColorFg(colTeal)
+          stdout.write(label[pos..^1])
+          written += label.len - pos
 
-      if truncated.len < w:
-        stdout.write(spaces(w - truncated.len))
+      if written < w:
+        stdout.write(spaces(w - written))
 
       setThemeFg()
       if idx == sb.cursorIndex and sb.focused:
         setThemeColors()
     else:
       stdout.write(spaces(w))
-
-  # Vertical separator
-  for row in 1..visibleRows:
-    moveCursor(row, w + 1)
-    setColorFg(colGutter)
-    stdout.write("\xe2\x94\x82")  # │ (U+2502)
-    setThemeFg()
 
 proc renderModalRow(startCol, innerWidth: int, line: string) =
   ## Render a single content row inside the modal: │ content │
@@ -578,6 +583,12 @@ proc render*(state: EditorState) =
 
   # Draw editor buffer (frozen when in commit mode)
   for row in 0..<editorRows:
+    # Draw separator over any sidebar overflow (editor has higher z-index)
+    if sidebarVisible and not inCommit:
+      moveCursor(row + 1, state.sidebar.width + 1)
+      setColorFg(colGutter)
+      stdout.write("\xe2\x94\x82")  # │ (U+2502)
+      setThemeFg()
     moveCursor(row + 1, colOffset + 1)
     clearLine()
 

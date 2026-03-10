@@ -87,6 +87,11 @@ proc handleExploreMode*(state: var EditorState, key: InputKey) =
     sidebarMoveDown(state.sidebar)
   of kkArrowUp:
     sidebarMoveUp(state.sidebar)
+  of kkArrowRight:
+    inc state.sidebar.horizontalScroll
+  of kkArrowLeft:
+    if state.sidebar.horizontalScroll > 0:
+      dec state.sidebar.horizontalScroll
 
   of kkCtrlKey:
     case key.ctrl

@@ -109,6 +109,7 @@ type
     flatList*: seq[FileNode]
     cursorIndex*: int
     scrollOffset*: int
+    horizontalScroll*: int
 
   GitFileStatus* = object
     path*: string
