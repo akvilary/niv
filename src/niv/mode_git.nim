@@ -305,7 +305,9 @@ proc handleBranchesView(state: var EditorState, key: InputKey) =
 
   of kkEnter:
     if state.gitPanel.branchCursorIndex < branchCount:
-      let branch = state.gitPanel.filteredBranches[state.gitPanel.branchCursorIndex]
+      var branch = state.gitPanel.filteredBranches[state.gitPanel.branchCursorIndex]
+      if branch.startsWith("origin/"):
+        branch = branch[7..^1]
       let (ok, output) = gitCheckout(branch)
       if ok:
         state.statusMessage = "Switched to " & branch

@@ -233,7 +233,7 @@ proc gitBranches*(count: int = 40, skip: int = 0, query: string = ""): seq[strin
       let pattern = "*" & query & "*"
       cmd.add(" refs/heads/" & pattern & " refs/remotes/" & pattern)
     else:
-      cmd.add(" refs/heads/ refs/remotes/")
+      cmd.add(" refs/heads/")
     let (output, code) = execCmdEx(cmd, options = {poUsePath})
     if code != 0: return @[]
     var idx = 0
