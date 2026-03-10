@@ -192,6 +192,7 @@ proc tokenizePython(text: string, startLine: int = 0, endLine: int = int.high): 
   # Import tracking: detect 'import' and 'from' lines
   var inImportLine = false  # after 'import' keyword
   var inFromLine = false    # after 'from' keyword, before 'import'
+  var inImportParens = false  # inside parenthesized import list
   var afterDot = false      # identifier after a dot
 
   # Function call parenthesis depth (for keyword argument detection)
@@ -223,8 +224,9 @@ proc tokenizePython(text: string, startLine: int = 0, endLine: int = int.high): 
         atLineStart = true
         lineIndent = 0
         lastKeyword = ""
-        inImportLine = false
-        inFromLine = false
+        if not inImportParens:
+          inImportLine = false
+          inFromLine = false
         afterDot = false
         # Don't reset inFuncParams - params can span lines
       else:
@@ -523,7 +525,9 @@ proc tokenizePython(text: string, startLine: int = 0, endLine: int = int.high): 
     of '(':
       lastKeyword = ""
       afterDot = false
-      if inFuncParams:
+      if inImportLine:
+        inImportParens = true
+      elif inFuncParams:
         inc funcParamDepth
       elif expectDefParams and funcParamDepth == 0 and tokens.len > 0 and
            tokens[^1].kind in {ptFunction, ptMethod}:
@@ -539,7 +543,10 @@ proc tokenizePython(text: string, startLine: int = 0, endLine: int = int.high): 
     of ')':
       lastKeyword = ""
       afterDot = false
-      if inFuncParams:
+      if inImportParens:
+        inImportParens = false
+        inImportLine = false
+      elif inFuncParams:
         dec funcParamDepth
         if funcParamDepth <= 0:
           inFuncParams = false
@@ -814,13 +821,51 @@ type
     bodyStartLine: int
     bodyIndent: int
 
+proc collectImportNames(lines: openArray[string], startIdx: int, firstPart: string): (string, int) =
+  ## Collect names from potentially multiline parenthesized import.
+  ## Returns (names string with parens stripped, last consumed line index).
+  var raw = firstPart
+  if not raw.startsWith("("):
+    return (raw, startIdx)
+  raw = raw[1..^1]  # strip opening paren
+  let closeIdx = raw.find(')')
+  if closeIdx >= 0:
+    return (raw[0..<closeIdx], startIdx)
+  var idx = startIdx + 1
+  while idx < lines.len:
+    let ln = lines[idx].strip()
+    let ci = ln.find(')')
+    if ci >= 0:
+      if ci > 0:
+        raw.add(", " & ln[0..<ci])
+      return (raw, idx)
+    if ln.len > 0:
+      raw.add(", " & ln)
+    inc idx
+  return (raw, idx)
+
+proc addParsedImports(result: var seq[ImportInfo], module: string, names: string) =
+  for part in names.split(','):
+    let trimmed = part.strip()
+    if trimmed.len == 0: continue
+    let asParts = trimmed.split(" as ")
+    let name = asParts[0].strip()
+    if name.len == 0: continue
+    let alias = if asParts.len > 1: asParts[1].strip() else: ""
+    result.add(ImportInfo(module: module, name: name, alias: alias))
+
 proc parseImports(text: string, packageDir: string = ""): seq[ImportInfo] =
-  for rawLine in text.split('\n'):
-    let line = rawLine.strip()
+  let lines = text.split('\n')
+  var i = 0
+
+  while i < lines.len:
+    let line = lines[i].strip()
     if line.startsWith("from "):
       let rest = line[5..^1].strip()
       let importIdx = rest.find(" import ")
-      if importIdx < 0: continue
+      if importIdx < 0:
+        inc i
+        continue
       var module = rest[0..<importIdx].strip()
       if module.startsWith(".") and packageDir.len > 0:
         var dots = 0
@@ -835,10 +880,14 @@ proc parseImports(text: string, packageDir: string = ""): seq[ImportInfo] =
           else:
             let asPackage = baseDir / relPath / "__init__.py"
             if fileExists(asPackage): module = asPackage
-            else: continue
+            else:
+              inc i
+              continue
         else:
           # from . import name — name could be a submodule file
-          let names = rest[importIdx + 8..^1].strip()
+          let namesRaw = rest[importIdx + 8..^1].strip()
+          let (names, endIdx) = collectImportNames(lines, i, namesRaw)
+          i = endIdx
           for part in names.split(','):
             let trimmed = part.strip()
             if trimmed.len == 0: continue
@@ -856,17 +905,15 @@ proc parseImports(text: string, packageDir: string = ""): seq[ImportInfo] =
               let initFile = baseDir / "__init__.py"
               if fileExists(initFile):
                 result.add(ImportInfo(module: initFile, name: name, alias: alias))
+          inc i
           continue
       elif module.startsWith("."):
+        inc i
         continue
-      let names = rest[importIdx + 8..^1].strip()
-      for part in names.split(','):
-        let trimmed = part.strip()
-        if trimmed.len == 0: continue
-        let asParts = trimmed.split(" as ")
-        let name = asParts[0].strip()
-        let alias = if asParts.len > 1: asParts[1].strip() else: ""
-        result.add(ImportInfo(module: module, name: name, alias: alias))
+      let namesRaw = rest[importIdx + 8..^1].strip()
+      let (names, endIdx) = collectImportNames(lines, i, namesRaw)
+      i = endIdx
+      addParsedImports(result, module, names)
     elif line.startsWith("import "):
       let rest = line[7..^1].strip()
       for part in rest.split(','):
@@ -876,6 +923,7 @@ proc parseImports(text: string, packageDir: string = ""): seq[ImportInfo] =
         let module = asParts[0].strip()
         let alias = if asParts.len > 1: asParts[1].strip() else: ""
         result.add(ImportInfo(module: module, name: "", alias: alias))
+    inc i
 
 proc parseClasses(text: string): seq[ClassInfo] =
   ## Extract class definitions with their base classes
