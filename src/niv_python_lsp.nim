@@ -9,7 +9,7 @@
 ##   - Go-to-definition with import resolution and inheritance chain (MRO)
 ##   - Basic diagnostics (unterminated strings)
 
-import std/[json, strutils, os, tables, osproc, sets]
+import std/[json, strutils, os, tables, osproc, sets, sequtils]
 
 # ---------------------------------------------------------------------------
 # Types
@@ -54,6 +54,7 @@ type
     version: int
     knownTypes: HashSet[string]
     knownFunctions: HashSet[string]
+    knownEnums: HashSet[string]
 
 # Semantic token type indices (must match legend in initialize response)
 const
@@ -182,7 +183,8 @@ proc emitStringTokens(tokens: var seq[PythonToken], text: string,
 
 proc tokenizePython(text: string, startLine: int = 0, endLine: int = int.high;
                     knownTypes: HashSet[string] = default(HashSet[string]);
-                    knownFunctions: HashSet[string] = default(HashSet[string])): (seq[PythonToken], seq[DiagInfo]) =
+                    knownFunctions: HashSet[string] = default(HashSet[string]);
+                    knownEnums: HashSet[string] = default(HashSet[string])): (seq[PythonToken], seq[DiagInfo]) =
   var tokens: seq[PythonToken]
   var diags: seq[DiagInfo]
   var pos = 0
@@ -208,6 +210,7 @@ proc tokenizePython(text: string, startLine: int = 0, endLine: int = int.high;
   var inFromLine = false    # after 'from' keyword, before 'import'
   var inImportParens = false  # inside parenthesized import list
   var afterDot = false      # identifier after a dot
+  var lastIdent = ""        # last seen identifier (for enum member detection)
 
   # Function call parenthesis depth (for keyword argument detection)
   var callDepth = 0
@@ -358,6 +361,7 @@ proc tokenizePython(text: string, startLine: int = 0, endLine: int = int.high;
           advance()
         let word = text[startPos..<pos]
         let length = pos - startPos
+        lastIdent = word
 
         # Classify the identifier
         if word == "def" or word == "class":
@@ -413,15 +417,17 @@ proc tokenizePython(text: string, startLine: int = 0, endLine: int = int.high;
           # Module name after 'from'
           tokens.add(PythonToken(kind: ptNamespace, line: sLine, col: sCol, length: length))
         elif wasDot:
-          # Identifier after dot → property or method call
-          # Lookahead for '(' to distinguish method call from property access
-          var lookPos = pos
-          while lookPos < text.len and text[lookPos] in {' ', '\t'}:
-            inc lookPos
-          if lookPos < text.len and text[lookPos] == '(':
-            tokens.add(PythonToken(kind: ptFunction, line: sLine, col: sCol, length: length))
+          # Identifier after dot → enum member, method call, or property
+          if lastIdent in knownEnums:
+            tokens.add(PythonToken(kind: ptBuiltinConst, line: sLine, col: sCol, length: length))
           else:
-            tokens.add(PythonToken(kind: ptProperty, line: sLine, col: sCol, length: length))
+            var lookPos = pos
+            while lookPos < text.len and text[lookPos] in {' ', '\t'}:
+              inc lookPos
+            if lookPos < text.len and text[lookPos] == '(':
+              tokens.add(PythonToken(kind: ptFunction, line: sLine, col: sCol, length: length))
+            else:
+              tokens.add(PythonToken(kind: ptProperty, line: sLine, col: sCol, length: length))
         elif callDepth > 0 and (block:
           var lp = pos
           while lp < text.len and text[lp] in {' ', '\t'}: inc lp
@@ -1039,8 +1045,10 @@ proc parseFunctions(text: string): seq[string] =
         if nameEnd > 0:
           result.add(rest[0..<nameEnd])
 
+const enumBaseSet = ["Enum", "IntEnum", "StrEnum", "Flag", "IntFlag"].toHashSet()
+
 type SymbolKind = enum
-  skClass, skFunction, skUnknown
+  skClass, skEnum, skFunction, skUnknown
 
 var symbolCheckCache: Table[string, SymbolKind]
 
@@ -1059,8 +1067,9 @@ proc findSymbolInModule(modulePath: string, name: string, depth: int = 0): Symbo
     return skUnknown
   for c in parseClasses(moduleText):
     if c.name == name:
-      symbolCheckCache[key] = skClass
-      return skClass
+      let kind = if c.bases.anyIt(it in enumBaseSet): skEnum else: skClass
+      symbolCheckCache[key] = kind
+      return kind
   for f in parseFunctions(moduleText):
     if f == name:
       symbolCheckCache[key] = skFunction
@@ -1077,11 +1086,14 @@ proc findSymbolInModule(modulePath: string, name: string, depth: int = 0): Symbo
           return kind
   return skUnknown
 
-proc collectKnownSymbols*(text: string, filePath: string = ""): (HashSet[string], HashSet[string]) =
-  ## Returns (knownTypes, knownFunctions)
+proc collectKnownSymbols*(text: string, filePath: string = ""): (HashSet[string], HashSet[string], HashSet[string]) =
+  ## Returns (knownTypes, knownFunctions, knownEnums)
   var knownTypes: HashSet[string]
   var knownFunctions: HashSet[string]
+  var knownEnums: HashSet[string]
   for c in parseClasses(text):
+    if c.bases.anyIt(it in enumBaseSet):
+      knownEnums.incl(c.name)
     knownTypes.incl(c.name)
   for f in parseFunctions(text):
     knownFunctions.incl(f)
@@ -1094,13 +1106,16 @@ proc collectKnownSymbols*(text: string, filePath: string = ""): (HashSet[string]
       let kind = findSymbolInModule(modulePath, imp.name)
       case kind
       of skClass: knownTypes.incl(target)
+      of skEnum:
+        knownTypes.incl(target)
+        knownEnums.incl(target)
       of skFunction: knownFunctions.incl(target)
       of skUnknown:
         if isPascalCase(imp.name):
           knownTypes.incl(target)
     elif isPascalCase(imp.name):
       knownTypes.incl(target)
-  return (knownTypes, knownFunctions)
+  return (knownTypes, knownFunctions, knownEnums)
 
 proc findDefinitionInText(text: string, word: string): (int, int) =
   ## Find `def word` or `class word` in text. Returns (line, col) or (-1, -1).
@@ -1382,8 +1397,8 @@ proc main() =
       let version = td["version"].getInt()
       var filePath = ""
       if uri.startsWith("file://"): filePath = uri[7..^1]
-      let (kt, kf) = collectKnownSymbols(text, filePath)
-      documents[uri] = DocumentState(uri: uri, text: text, version: version, knownTypes: kt, knownFunctions: kf)
+      let (kt, kf, ke) = collectKnownSymbols(text, filePath)
+      documents[uri] = DocumentState(uri: uri, text: text, version: version, knownTypes: kt, knownFunctions: kf, knownEnums: ke)
       if text.len < 1_000_000:
         publishDiagnostics(uri, text)
 
@@ -1399,9 +1414,10 @@ proc main() =
           documents[uri].version = version
           var filePath = ""
           if uri.startsWith("file://"): filePath = uri[7..^1]
-          let (kt, kf) = collectKnownSymbols(newText, filePath)
+          let (kt, kf, ke) = collectKnownSymbols(newText, filePath)
           documents[uri].knownTypes = kt
           documents[uri].knownFunctions = kf
+          documents[uri].knownEnums = ke
           if newText.len < 1_000_000:
             publishDiagnostics(uri, newText)
 
@@ -1414,7 +1430,8 @@ proc main() =
       let text = if uri in documents: documents[uri].text else: ""
       let kt = if uri in documents: documents[uri].knownTypes else: initHashSet[string]()
       let kf = if uri in documents: documents[uri].knownFunctions else: initHashSet[string]()
-      let (tokens, _) = tokenizePython(text, knownTypes = kt, knownFunctions = kf)
+      let ke = if uri in documents: documents[uri].knownEnums else: initHashSet[string]()
+      let (tokens, _) = tokenizePython(text, knownTypes = kt, knownFunctions = kf, knownEnums = ke)
       let data = encodeSemanticTokens(tokens)
       sendTokensResponse(id, data)
 
@@ -1427,7 +1444,8 @@ proc main() =
       let text = if uri in documents: documents[uri].text else: ""
       let kt = if uri in documents: documents[uri].knownTypes else: initHashSet[string]()
       let kf = if uri in documents: documents[uri].knownFunctions else: initHashSet[string]()
-      let (tokens, _) = tokenizePython(text, startLine, endLine, kt, kf)
+      let ke = if uri in documents: documents[uri].knownEnums else: initHashSet[string]()
+      let (tokens, _) = tokenizePython(text, startLine, endLine, kt, kf, ke)
       let data = encodeSemanticTokens(tokens)
       sendTokensResponse(id, data)
 
