@@ -3,6 +3,7 @@
 import std/[strutils, os, unicode]
 import types
 import buffer
+import git
 import terminal
 import viewport
 import lsp_manager
@@ -302,7 +303,7 @@ proc renderGitPanel(state: EditorState, startRow, panelHeight, totalWidth: int) 
       displayLines.add((" No changes", true, -1))
 
     # Help line
-    let helpLine = " s:stage/unstage  d:discard  c:commit  m:merge  l:log  Enter:diff  r:refresh  q:close"
+    let helpLine = " s:stage/unstage  d:discard  c:commit  m:merge  b:branches  l:log  Enter:diff  r:refresh  q:close"
 
     # Adjust scroll to keep cursor visible
     # Map cursorIndex to display line index
@@ -573,6 +574,68 @@ proc renderGitPanel(state: EditorState, startRow, panelHeight, totalWidth: int) 
         let truncHelp = if helpLine.len > contentWidth: helpLine[0..<contentWidth] else: helpLine
         stdout.write(truncHelp)
         setThemeFg()
+
+  of gvBranches:
+    let contentRows = panelHeight - 3  # separator, search line, help line
+    let helpLine = " Enter:checkout  Esc:back  \xe2\x86\x91\xe2\x86\x93:navigate"
+
+    # Search input line
+    moveCursor(startRow + 1, 1)
+    setThemeColors()
+    clearLine()
+    setColorFg(colCyan)
+    stdout.write(" Search: ")
+    setThemeFg()
+    stdout.write(gp.branchQuery)
+    stdout.write("\xe2\x96\x8e")  # ▎ cursor indicator
+
+    # Adjust scroll to keep cursor visible
+    var scrollOff = gp.branchScrollOffset
+    if gp.branchCursorIndex < scrollOff:
+      scrollOff = gp.branchCursorIndex
+    elif gp.branchCursorIndex >= scrollOff + contentRows:
+      scrollOff = gp.branchCursorIndex - contentRows + 1
+
+    # Branch list
+    let currentBranch = gitCurrentBranch()
+    for row in 0..<contentRows:
+      moveCursor(startRow + 2 + row, 1)
+      setThemeColors()
+      clearLine()
+
+      let idx = scrollOff + row
+      if idx < gp.filteredBranches.len:
+        let branch = gp.filteredBranches[idx]
+        let isSelected = idx == gp.branchCursorIndex
+        let isCurrent = branch == currentBranch
+
+        if isSelected:
+          setColorBg(colCursorLn)
+
+        if isCurrent:
+          setColorFg(colGreen)
+          stdout.write(" * ")
+        else:
+          stdout.write("   ")
+
+        stdout.write(branch)
+
+        if isSelected:
+          let written = 3 + branch.len
+          if written < contentWidth:
+            stdout.write(spaces(contentWidth - written))
+          setThemeColors()
+        if isCurrent:
+          setThemeFg()
+
+    # Help line
+    moveCursor(startRow + 2 + contentRows, 1)
+    setThemeColors()
+    clearLine()
+    setColorFg(colGutter)
+    let truncHelp = if helpLine.len > contentWidth: helpLine[0..<contentWidth] else: helpLine
+    stdout.write(truncHelp)
+    setThemeFg()
 
 proc writeWithSearchBg(line: string, s, e: int,
                        matchRanges: seq[tuple[startCol, endCol: int]]) =

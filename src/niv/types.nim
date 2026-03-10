@@ -133,6 +133,7 @@ type
     gvDiff
     gvLog
     gvMergeConflicts
+    gvBranches
 
   GitPanelState* = object
     visible*: bool
@@ -154,6 +155,11 @@ type
     conflictFiles*: seq[ConflictFile]
     conflictCursorIndex*: int
     conflictScrollOffset*: int
+    branches*: seq[string]         # all branches sorted by recency
+    filteredBranches*: seq[string] # filtered by search query
+    branchQuery*: string           # search input
+    branchCursorIndex*: int
+    branchScrollOffset*: int
     savedBuffer*: Buffer
     savedCursor*: Position
     savedTopLine*: int

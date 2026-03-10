@@ -1,6 +1,6 @@
 ## Git mode key handler
 
-import std/[strutils, unicode]
+import std/[strutils, unicode, sequtils]
 import types
 import buffer
 import git
@@ -145,6 +145,13 @@ proc handleFilesView(state: var EditorState, key: InputKey) =
       state.gitPanel.view = gvLog
     of Rune(ord('m')):
       enterMergeInput(state)
+    of Rune(ord('b')):
+      state.gitPanel.branches = gitBranches()
+      state.gitPanel.branchQuery = ""
+      state.gitPanel.filteredBranches = state.gitPanel.branches
+      state.gitPanel.branchCursorIndex = 0
+      state.gitPanel.branchScrollOffset = 0
+      state.gitPanel.view = gvBranches
     of Rune(ord('r')):
       refreshGitFiles(state.gitPanel)
     else:
@@ -239,6 +246,55 @@ proc handleLogView(state: var EditorState, key: InputKey) =
   of kkArrowUp:
     if state.gitPanel.logCursorIndex > 0:
       dec state.gitPanel.logCursorIndex
+
+  else:
+    discard
+
+proc filterBranches(state: var EditorState) =
+  let query = state.gitPanel.branchQuery.toLowerAscii()
+  if query.len == 0:
+    state.gitPanel.filteredBranches = state.gitPanel.branches
+  else:
+    state.gitPanel.filteredBranches = state.gitPanel.branches.filterIt(
+      query in it.toLowerAscii())
+  state.gitPanel.branchCursorIndex = 0
+  state.gitPanel.branchScrollOffset = 0
+
+proc handleBranchesView(state: var EditorState, key: InputKey) =
+  let branchCount = state.gitPanel.filteredBranches.len
+
+  case key.kind
+  of kkEscape:
+    state.gitPanel.view = gvFiles
+    state.statusMessage = ""
+
+  of kkChar:
+    # All chars go to search input
+    state.gitPanel.branchQuery.add($key.ch)
+    filterBranches(state)
+
+  of kkBackspace:
+    if state.gitPanel.branchQuery.len > 0:
+      state.gitPanel.branchQuery = state.gitPanel.branchQuery[0..^2]
+      filterBranches(state)
+
+  of kkEnter:
+    if state.gitPanel.branchCursorIndex < branchCount:
+      let branch = state.gitPanel.filteredBranches[state.gitPanel.branchCursorIndex]
+      let (ok, output) = gitCheckout(branch)
+      if ok:
+        state.statusMessage = "Switched to " & branch
+        refreshGitFiles(state.gitPanel)
+        state.gitPanel.view = gvFiles
+      else:
+        state.statusMessage = "Checkout failed: " & output
+
+  of kkArrowDown:
+    if branchCount > 0 and state.gitPanel.branchCursorIndex < branchCount - 1:
+      inc state.gitPanel.branchCursorIndex
+  of kkArrowUp:
+    if state.gitPanel.branchCursorIndex > 0:
+      dec state.gitPanel.branchCursorIndex
 
   else:
     discard
@@ -380,3 +436,5 @@ proc handleGitMode*(state: var EditorState, key: InputKey) =
     handleLogView(state, key)
   of gvMergeConflicts:
     handleConflictsView(state, key)
+  of gvBranches:
+    handleBranchesView(state, key)

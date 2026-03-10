@@ -203,6 +203,27 @@ proc resolveConflict*(path: string, choice: ConflictChoice, conflictIdx: int): b
   except IOError:
     return false
 
+proc gitBranches*(): seq[string] =
+  ## Get all branches sorted by most recent committerdate (descending).
+  try:
+    let (output, code) = execCmdEx(
+      "git branch -a --sort=-committerdate --format='%(refname:short)'",
+      options = {poUsePath})
+    if code != 0: return @[]
+    for line in output.splitLines():
+      let name = line.strip()
+      if name.len > 0:
+        result.add(name)
+  except OSError:
+    return @[]
+
+proc gitCheckout*(branch: string): (bool, string) =
+  try:
+    let (output, code) = execCmdEx("git checkout " & quoteShell(branch), options = {poUsePath})
+    return (code == 0, output.strip())
+  except OSError:
+    return (false, "Failed to run git checkout")
+
 proc openGitPanel*(panel: var GitPanelState) =
   panel.visible = true
   panel.view = gvFiles
