@@ -52,6 +52,7 @@ type
     uri: string
     text: string
     version: int
+    knownTypes: HashSet[string]
 
 # Semantic token type indices (must match legend in initialize response)
 const
@@ -104,6 +105,16 @@ const pythonBuiltinConstants = ["True", "False", "None"]
 const pythonBuiltinTypes = [
   "int", "str", "float", "list", "dict", "set", "tuple", "bool",
   "bytes", "bytearray", "memoryview", "complex", "frozenset", "object",
+  # typing module
+  "Optional", "Union", "List", "Dict", "Set", "Tuple", "FrozenSet",
+  "Sequence", "Mapping", "MutableMapping", "MutableSequence", "MutableSet",
+  "Iterable", "Iterator", "Generator", "Coroutine", "AsyncIterator",
+  "AsyncGenerator", "Awaitable", "Callable", "Type", "ClassVar",
+  "Any", "NoReturn", "Final", "Literal", "TypeVar", "Generic",
+  "Protocol", "TypedDict", "NamedTuple", "Annotated", "TypeAlias",
+  "TypeGuard", "ParamSpec", "Concatenate", "Unpack", "Self",
+  "Never", "LiteralString", "Required", "NotRequired", "OrderedDict",
+  "DefaultDict", "Counter", "Deque", "ChainMap",
 ]
 
 const pythonBuiltinFunctions = [
@@ -168,7 +179,8 @@ proc emitStringTokens(tokens: var seq[PythonToken], text: string,
 # Python Tokenizer + Diagnostics (with context tracking)
 # ---------------------------------------------------------------------------
 
-proc tokenizePython(text: string, startLine: int = 0, endLine: int = int.high): (seq[PythonToken], seq[DiagInfo]) =
+proc tokenizePython(text: string, startLine: int = 0, endLine: int = int.high;
+                    knownTypes: HashSet[string] = default(HashSet[string])): (seq[PythonToken], seq[DiagInfo]) =
   var tokens: seq[PythonToken]
   var diags: seq[DiagInfo]
   var pos = 0
@@ -420,6 +432,8 @@ proc tokenizePython(text: string, startLine: int = 0, endLine: int = int.high): 
           tokens.add(PythonToken(kind: ptBuiltin, line: sLine, col: sCol, length: length))
         elif word in selfParamSet:
           tokens.add(PythonToken(kind: ptSelfParam, line: sLine, col: sCol, length: length))
+        elif word in knownTypes:
+          tokens.add(PythonToken(kind: ptType, line: sLine, col: sCol, length: length))
         else:
           # Lookahead: identifier followed by '(' → function call
           var lookPos = pos
@@ -1001,6 +1015,57 @@ proc resolveModulePath(moduleName: string): string =
   modulePathCache[moduleName] = ""
   return ""
 
+proc isPascalCase(s: string): bool =
+  if s.len == 0 or s[0] notin {'A'..'Z'}: return false
+  for i in 1..<s.len:
+    if s[i] in {'a'..'z'}: return true
+  return false
+
+var classCheckCache: Table[string, bool]
+
+proc isClassInModule(modulePath: string, name: string, depth: int = 0): bool =
+  ## Check if `name` is a class defined or re-exported in the module.
+  ## Follows import chains up to depth 5.
+  if depth > 5: return false
+  let key = modulePath & ":" & name
+  if classCheckCache.hasKey(key):
+    return classCheckCache[key]
+  classCheckCache[key] = false  # prevent cycles
+  var moduleText: string
+  try:
+    moduleText = readFile(modulePath)
+  except IOError:
+    return false
+  # Check local class definitions
+  for c in parseClasses(moduleText):
+    if c.name == name:
+      classCheckCache[key] = true
+      return true
+  # Check imports in this module for re-exports
+  let pkgDir = parentDir(modulePath)
+  for imp in parseImports(moduleText, pkgDir):
+    if imp.name == name:
+      let impPath = resolveModulePath(imp.module)
+      if impPath.len > 0 and isClassInModule(impPath, name, depth + 1):
+        classCheckCache[key] = true
+        return true
+  return false
+
+proc collectKnownTypes*(text: string, filePath: string = ""): HashSet[string] =
+  ## Collect known type names: local class defs + resolved imported classes
+  for c in parseClasses(text):
+    result.incl(c.name)
+  let packageDir = if filePath.len > 0: parentDir(filePath) else: ""
+  for imp in parseImports(text, packageDir):
+    if imp.name.len == 0: continue
+    let target = if imp.alias.len > 0: imp.alias else: imp.name
+    let modulePath = resolveModulePath(imp.module)
+    if modulePath.len > 0:
+      if isClassInModule(modulePath, imp.name):
+        result.incl(target)
+    elif isPascalCase(imp.name):
+      result.incl(target)
+
 proc findDefinitionInText(text: string, word: string): (int, int) =
   ## Find `def word` or `class word` in text. Returns (line, col) or (-1, -1).
   let lines = text.split('\n')
@@ -1279,7 +1344,10 @@ proc main() =
       let uri = td["uri"].getStr()
       let text = td["text"].getStr()
       let version = td["version"].getInt()
-      documents[uri] = DocumentState(uri: uri, text: text, version: version)
+      var filePath = ""
+      if uri.startsWith("file://"): filePath = uri[7..^1]
+      let kt = collectKnownTypes(text, filePath)
+      documents[uri] = DocumentState(uri: uri, text: text, version: version, knownTypes: kt)
       if text.len < 1_000_000:
         publishDiagnostics(uri, text)
 
@@ -1293,6 +1361,9 @@ proc main() =
         if uri in documents:
           documents[uri].text = newText
           documents[uri].version = version
+          var filePath = ""
+          if uri.startsWith("file://"): filePath = uri[7..^1]
+          documents[uri].knownTypes = collectKnownTypes(newText, filePath)
           if newText.len < 1_000_000:
             publishDiagnostics(uri, newText)
 
@@ -1303,7 +1374,8 @@ proc main() =
     of "textDocument/semanticTokens/full":
       let uri = msg["params"]["textDocument"]["uri"].getStr()
       let text = if uri in documents: documents[uri].text else: ""
-      let (tokens, _) = tokenizePython(text)
+      let kt = if uri in documents: documents[uri].knownTypes else: initHashSet[string]()
+      let (tokens, _) = tokenizePython(text, knownTypes = kt)
       let data = encodeSemanticTokens(tokens)
       sendTokensResponse(id, data)
 
@@ -1314,7 +1386,8 @@ proc main() =
       let startLine = rangeNode["start"]["line"].getInt()
       let endLine = rangeNode["end"]["line"].getInt()
       let text = if uri in documents: documents[uri].text else: ""
-      let (tokens, _) = tokenizePython(text, startLine, endLine)
+      let kt = if uri in documents: documents[uri].knownTypes else: initHashSet[string]()
+      let (tokens, _) = tokenizePython(text, startLine, endLine, kt)
       let data = encodeSemanticTokens(tokens)
       sendTokensResponse(id, data)
 
