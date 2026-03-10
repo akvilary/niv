@@ -57,7 +57,7 @@ proc handleNormalMode*(state: var EditorState, key: InputKey) =
     of Rune(ord('b')):
       if not state.gitPanel.visible:
         openGitPanel(state.gitPanel)
-      state.gitPanel.branchQuery = ""
+      state.gitPanel.branchQuery = @[]
       filterBranches(state.gitPanel)
       state.gitPanel.branchDirectOpen = true
       state.gitPanel.view = gvBranches

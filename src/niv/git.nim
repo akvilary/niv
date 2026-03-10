@@ -236,10 +236,14 @@ proc gitBranches*(count: int = 40, skip: int = 0, query: string = ""): seq[strin
       cmd.add(" refs/heads/")
     let (output, code) = execCmdEx(cmd, options = {poUsePath})
     if code != 0: return @[]
+    # Prepend current branch when browsing without search
+    let current = if query.len == 0 and skip == 0: gitCurrentBranch() else: ""
+    if current.len > 0:
+      result.add(current)
     var idx = 0
     for line in output.splitLines():
       let name = line.strip()
-      if name.len > 0:
+      if name.len > 0 and name != current:
         if idx >= skip:
           result.add(name)
         inc idx

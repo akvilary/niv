@@ -157,7 +157,7 @@ type
     conflictScrollOffset*: int
     branches*: seq[string]         # all branches sorted by recency
     filteredBranches*: seq[string] # filtered by search query
-    branchQuery*: string           # search input
+    branchQuery*: seq[Rune]        # search input
     branchCursorIndex*: int
     branchDirectOpen*: bool        # opened via Ctrl+b from normal mode
     branchScrollOffset*: int

@@ -586,7 +586,7 @@ proc renderGitPanel(state: EditorState, startRow, panelHeight, totalWidth: int) 
     setColorFg(colCyan)
     stdout.write(" Search: ")
     setThemeFg()
-    stdout.write(gp.branchQuery)
+    stdout.write($gp.branchQuery)
     stdout.write("\xe2\x96\x8e")  # ▎ cursor indicator
 
     # Adjust scroll to keep cursor visible

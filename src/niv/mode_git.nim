@@ -17,14 +17,14 @@ proc loadMoreLog(panel: var GitPanelState) =
 
 proc loadMoreBranches(panel: var GitPanelState) =
   if not panel.branchHasMore: return
-  let more = gitBranches(batchSize, panel.branchLoadedCount, panel.branchQuery)
+  let more = gitBranches(batchSize, panel.branchLoadedCount, $panel.branchQuery)
   panel.filteredBranches.add(more)
   panel.branchLoadedCount += more.len
   if more.len < batchSize:
     panel.branchHasMore = false
 
 proc filterBranches*(panel: var GitPanelState) =
-  panel.filteredBranches = gitBranches(batchSize, query = panel.branchQuery)
+  panel.filteredBranches = gitBranches(batchSize, query = $panel.branchQuery)
   panel.branchLoadedCount = panel.filteredBranches.len
   panel.branchHasMore = panel.filteredBranches.len >= batchSize
   panel.branchCursorIndex = 0
@@ -173,7 +173,7 @@ proc handleFilesView(state: var EditorState, key: InputKey) =
     of Rune(ord('m')):
       enterMergeInput(state)
     of Rune(ord('b')):
-      state.gitPanel.branchQuery = ""
+      state.gitPanel.branchQuery = @[]
       filterBranches(state.gitPanel)
       state.gitPanel.view = gvBranches
     of Rune(ord('r')):
@@ -295,12 +295,12 @@ proc handleBranchesView(state: var EditorState, key: InputKey) =
     closeBranchesView(state)
 
   of kkChar:
-    state.gitPanel.branchQuery.add($key.ch)
+    state.gitPanel.branchQuery.add(key.ch)
     filterBranches(state.gitPanel)
 
   of kkBackspace:
     if state.gitPanel.branchQuery.len > 0:
-      state.gitPanel.branchQuery = state.gitPanel.branchQuery[0..^2]
+      state.gitPanel.branchQuery.setLen(state.gitPanel.branchQuery.len - 1)
       filterBranches(state.gitPanel)
 
   of kkEnter:
