@@ -81,17 +81,18 @@ proc renderSidebar(state: EditorState, editorRows: int) =
         if prefixLen <= truncated.len:
           setColorFg(colFg)
           stdout.write(truncated[0..<prefixLen])
+          let namepart = truncated[prefixLen..^1]
           let dotIdx = node.name.rfind('.')
-          if dotIdx > 0:
-            let baseName = node.name[0..<dotIdx]
-            let ext = node.name[dotIdx..^1]
+          if dotIdx > 0 and prefixLen + dotIdx <= truncated.len:
+            let baseName = namepart[0..<dotIdx]
+            let ext = namepart[dotIdx..^1]
             setColorFg(colFg)
             stdout.write(baseName)
             setColorFg(colTeal)
             stdout.write(ext)
           else:
             setColorFg(colComment)
-            stdout.write(truncated[prefixLen..^1])
+            stdout.write(namepart)
         else:
           setColorFg(colComment)
           stdout.write(truncated)
