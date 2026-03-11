@@ -370,11 +370,7 @@ proc tokenizePython(text: string, startLine: int = 0, endLine: int = int.high;
           lastKeyword = word
         elif word == "import":
           tokens.add(PythonToken(kind: ptKeyword, line: sLine, col: sCol, length: length))
-          if inFromLine:
-            inFromLine = false
-            inImportLine = true
-          else:
-            inImportLine = true
+          inImportLine = true
           lastKeyword = ""
         elif word == "from":
           tokens.add(PythonToken(kind: ptKeyword, line: sLine, col: sCol, length: length))
@@ -411,8 +407,8 @@ proc tokenizePython(text: string, startLine: int = 0, endLine: int = int.high;
             tokens.add(PythonToken(kind: ptParameter, line: sLine, col: sCol, length: length))
           expectParam = false
           isFirstParam = false
-        elif inImportLine:
-          # Module name after 'import'
+        elif inImportLine and not inFromLine:
+          # Module name after bare 'import'
           tokens.add(PythonToken(kind: ptNamespace, line: sLine, col: sCol, length: length))
         elif inFromLine:
           # Module name after 'from'
