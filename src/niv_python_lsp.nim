@@ -1242,6 +1242,35 @@ proc findMemberWithMRO(text: string, className: string, methodName: string,
 
   return ("", -1, -1)
 
+proc findMemberTransitive(className: string, memberName: string,
+                           imports: seq[ImportInfo],
+                           visitedPaths: var HashSet[string]): (string, int, int) =
+  ## Search for member through transitive imports (no depth limit).
+  for imp in imports:
+    let modulePath = resolveModulePath(imp.module)
+    if modulePath.len == 0 or modulePath in visitedPaths: continue
+    visitedPaths.incl(modulePath)
+    let moduleText = readFile(modulePath)
+    let moduleImports = parseImports(moduleText, parentDir(modulePath))
+    for mImp in moduleImports:
+      let mTarget = if mImp.alias.len > 0: mImp.alias else: mImp.name
+      if mTarget == className and mImp.name.len > 0:
+        let mPath = resolveModulePath(mImp.module)
+        if mPath.len > 0:
+          let mText = readFile(mPath)
+          var visited: HashSet[string]
+          let (fp, ml, mc) = findMemberWithMRO(
+            mText, mImp.name, memberName,
+            parseImports(mText, parentDir(mPath)), visited)
+          if ml >= 0:
+            let resultPath = if fp.len > 0: fp else: mPath
+            return (resultPath, ml, mc)
+    # Recurse into this module's imports
+    let (fp, ml, mc) = findMemberTransitive(
+      className, memberName, moduleImports, visitedPaths)
+    if ml >= 0: return (fp, ml, mc)
+  return ("", -1, -1)
+
 proc findEnclosingClass(text: string, useLine: int): string =
   ## Find the class that encloses the given line by comparing indentation.
   let lines = text.split('\n')
@@ -1761,159 +1790,108 @@ proc main() =
         if qualifier.contains('.'):
           let chainParts = qualifier.split('.')
           let root = chainParts[0]
-          var currentClass = ""
 
+          # Determine root classes to try
+          var rootClasses: seq[string]
           if root == "super":
-            # super().x.y → iterate base classes
             let enclosing = findEnclosingClass(text, defLine)
             if enclosing.len > 0:
               let classes = parseClasses(text)
               for cls in classes:
                 if cls.name == enclosing:
-                  for base in cls.bases:
-                    var cc = base
-                    var ok = true
-                    for i in 1..<chainParts.len:
-                      var visited: HashSet[string]
-                      let nextClass = resolveAttributeType(
-                        text, cc, chainParts[i], imports, visited)
-                      if nextClass.len == 0:
-                        # Try imported class
-                        var foundImport = false
-                        for imp in imports:
-                          let target = if imp.alias.len > 0: imp.alias else: imp.name
-                          if target == cc and imp.name.len > 0:
-                            let modulePath = resolveModulePath(imp.module)
-                            if modulePath.len > 0:
-                              let moduleText = readFile(modulePath)
-                              var visited2: HashSet[string]
-                              let nc = resolveAttributeType(
-                                moduleText, imp.name, chainParts[i],
-                                parseImports(moduleText, parentDir(modulePath)), visited2)
-                              if nc.len > 0:
-                                cc = nc
-                                foundImport = true
-                                break
-                        if not foundImport:
-                          ok = false
-                          break
-                      else:
-                        cc = nextClass
-                    if ok and cc.len > 0:
-                      var visited: HashSet[string]
-                      let (fp, ml, mc) = findMemberWithMRO(
-                        text, cc, name, imports, visited)
-                      if ml >= 0:
-                        let resultUri = if fp.len > 0: "file://" & fp else: uri
+                  rootClasses = cls.bases
+                  break
+          elif root == "self" or root == "cls":
+            let enc = findEnclosingClass(text, defLine)
+            if enc.len > 0: rootClasses = @[enc]
+          elif root.len > 0 and root[0] in {'A'..'Z'}:
+            rootClasses = @[root]
+          else:
+            let t = resolveQualifierType(text, root, defLine)
+            if t.len > 0: rootClasses = @[t]
+
+          for startClass in rootClasses:
+            var currentClass = startClass
+            var ok = true
+            for i in 1..<chainParts.len:
+              var visited: HashSet[string]
+              let nextClass = resolveAttributeType(
+                text, currentClass, chainParts[i], imports, visited)
+              if nextClass.len == 0:
+                var foundImport = false
+                for imp in imports:
+                  let target = if imp.alias.len > 0: imp.alias else: imp.name
+                  if target == currentClass and imp.name.len > 0:
+                    let modulePath = resolveModulePath(imp.module)
+                    if modulePath.len > 0:
+                      let moduleText = readFile(modulePath)
+                      var visited2: HashSet[string]
+                      let nc = resolveAttributeType(
+                        moduleText, imp.name, chainParts[i],
+                        parseImports(moduleText, parentDir(modulePath)), visited2)
+                      if nc.len > 0:
+                        currentClass = nc
+                        foundImport = true
+                        break
+                if not foundImport:
+                  ok = false
+                  break
+              else:
+                currentClass = nextClass
+
+            if ok and currentClass.len > 0:
+              var visited: HashSet[string]
+              let (fp, ml, mc) = findMemberWithMRO(
+                text, currentClass, name, imports, visited)
+              if ml >= 0:
+                let resultUri = if fp.len > 0: "file://" & fp else: uri
+                sendResponse(id, %*{
+                  "uri": resultUri,
+                  "range": {
+                    "start": {"line": ml, "character": mc},
+                    "end": {"line": ml, "character": mc + name.len}
+                  }
+                })
+                found = true
+              else:
+                # Direct import lookup
+                for imp in imports:
+                  let target = if imp.alias.len > 0: imp.alias else: imp.name
+                  if target == currentClass and imp.name.len > 0:
+                    let modulePath = resolveModulePath(imp.module)
+                    if modulePath.len > 0:
+                      let moduleText = readFile(modulePath)
+                      var visited2: HashSet[string]
+                      let (fp2, ml2, mc2) = findMemberWithMRO(
+                        moduleText, imp.name, name,
+                        parseImports(moduleText, parentDir(modulePath)), visited2)
+                      if ml2 >= 0:
+                        let resUri = if fp2.len > 0: "file://" & fp2
+                                     else: "file://" & modulePath
                         sendResponse(id, %*{
-                          "uri": resultUri,
+                          "uri": resUri,
                           "range": {
-                            "start": {"line": ml, "character": mc},
-                            "end": {"line": ml, "character": mc + name.len}
+                            "start": {"line": ml2, "character": mc2},
+                            "end": {"line": ml2, "character": mc2 + name.len}
                           }
                         })
                         found = true
                         break
-                      # Try imports for resolved class
-                      for imp in imports:
-                        let target = if imp.alias.len > 0: imp.alias else: imp.name
-                        if target == cc and imp.name.len > 0:
-                          let modulePath = resolveModulePath(imp.module)
-                          if modulePath.len > 0:
-                            let moduleText = readFile(modulePath)
-                            var visited2: HashSet[string]
-                            let (fp2, ml2, mc2) = findMemberWithMRO(
-                              moduleText, imp.name, name,
-                              parseImports(moduleText, parentDir(modulePath)), visited2)
-                            if ml2 >= 0:
-                              let resUri = if fp2.len > 0: "file://" & fp2
-                                           else: "file://" & modulePath
-                              sendResponse(id, %*{
-                                "uri": resUri,
-                                "range": {
-                                  "start": {"line": ml2, "character": mc2},
-                                  "end": {"line": ml2, "character": mc2 + name.len}
-                                }
-                              })
-                              found = true
-                              break
-                      if found: break
-                  break
-          else:
-            # self.x.y, cls.x.y, ClassName.x.y, var.x.y
-            if root == "self" or root == "cls":
-              currentClass = findEnclosingClass(text, defLine)
-            elif root.len > 0 and root[0] in {'A'..'Z'}:
-              currentClass = root
-            else:
-              currentClass = resolveQualifierType(text, root, defLine)
-
-            if currentClass.len > 0:
-              var ok = true
-              for i in 1..<chainParts.len:
-                var visited: HashSet[string]
-                let nextClass = resolveAttributeType(
-                  text, currentClass, chainParts[i], imports, visited)
-                if nextClass.len == 0:
-                  # Try imported class
-                  var foundImport = false
-                  for imp in imports:
-                    let target = if imp.alias.len > 0: imp.alias else: imp.name
-                    if target == currentClass and imp.name.len > 0:
-                      let modulePath = resolveModulePath(imp.module)
-                      if modulePath.len > 0:
-                        let moduleText = readFile(modulePath)
-                        var visited2: HashSet[string]
-                        let nc = resolveAttributeType(
-                          moduleText, imp.name, chainParts[i],
-                          parseImports(moduleText, parentDir(modulePath)), visited2)
-                        if nc.len > 0:
-                          currentClass = nc
-                          foundImport = true
-                          break
-                  if not foundImport:
-                    ok = false
-                    break
-                else:
-                  currentClass = nextClass
-
-              if ok and currentClass.len > 0:
-                var visited: HashSet[string]
-                let (fp, ml, mc) = findMemberWithMRO(
-                  text, currentClass, name, imports, visited)
-                if ml >= 0:
-                  let resultUri = if fp.len > 0: "file://" & fp else: uri
-                  sendResponse(id, %*{
-                    "uri": resultUri,
-                    "range": {
-                      "start": {"line": ml, "character": mc},
-                      "end": {"line": ml, "character": mc + name.len}
-                    }
-                  })
-                  found = true
-                else:
-                  for imp in imports:
-                    let target = if imp.alias.len > 0: imp.alias else: imp.name
-                    if target == currentClass and imp.name.len > 0:
-                      let modulePath = resolveModulePath(imp.module)
-                      if modulePath.len > 0:
-                        let moduleText = readFile(modulePath)
-                        var visited2: HashSet[string]
-                        let (fp2, ml2, mc2) = findMemberWithMRO(
-                          moduleText, imp.name, name,
-                          parseImports(moduleText, parentDir(modulePath)), visited2)
-                        if ml2 >= 0:
-                          let resUri = if fp2.len > 0: "file://" & fp2
-                                       else: "file://" & modulePath
-                          sendResponse(id, %*{
-                            "uri": resUri,
-                            "range": {
-                              "start": {"line": ml2, "character": mc2},
-                              "end": {"line": ml2, "character": mc2 + name.len}
-                            }
-                          })
-                          found = true
-                          break
+                # Transitive import lookup
+                if not found:
+                  var visitedPaths: HashSet[string]
+                  let (fp3, ml3, mc3) = findMemberTransitive(
+                    currentClass, name, imports, visitedPaths)
+                  if ml3 >= 0:
+                    sendResponse(id, %*{
+                      "uri": "file://" & fp3,
+                      "range": {
+                        "start": {"line": ml3, "character": mc3},
+                        "end": {"line": ml3, "character": mc3 + name.len}
+                      }
+                    })
+                    found = true
+            if found: break
 
         # super() → search base classes of enclosing class, skipping current
         if not found and qualifier == "super":
