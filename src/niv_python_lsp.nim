@@ -1388,6 +1388,26 @@ proc resolveAttributeType(text: string, className: string, attrName: string,
               if typeName.len > 0 and typeName[0] in {'A'..'Z'} and typeName notin wrapperTypes:
                 return typeName
 
+      # @property method: @property followed by def attrName(...) -> Type:
+      if stripped == "@property" and i + 1 < lines.len:
+        let nextStripped = lines[i + 1].strip()
+        let defPattern = "def " & attrName
+        if nextStripped.startsWith(defPattern) and
+           nextStripped.len > defPattern.len and
+           nextStripped[defPattern.len] in {'(', ' ', '\t'}:
+          let arrowIdx = nextStripped.find("->")
+          if arrowIdx >= 0:
+            let retPart = nextStripped[arrowIdx + 2..^1].strip()
+            # Strip trailing ':'
+            let colonIdx = retPart.find(':')
+            let cleanRet = if colonIdx >= 0: retPart[0..<colonIdx].strip() else: retPart
+            var typeName = ""
+            for c in cleanRet:
+              if c in identChars: typeName.add(c)
+              else: break
+            if typeName.len > 0 and typeName notin wrapperTypes:
+              return typeName
+
       # Class-level attribute: attrName: Type or attrName = Type(...)
       if indent == cls.bodyIndent and stripped.startsWith(attrName):
         let afterLen = attrName.len
