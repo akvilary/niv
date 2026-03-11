@@ -823,11 +823,13 @@ var pythonSearchPaths: seq[string]
 proc initPythonPaths() =
   try:
     let (output, exitCode) = execCmdEx(
-      "python3 -c \"import sys; print('\\n'.join(p for p in sys.path if p))\"")
+      "python3 -c \"import sys; print('\\n'.join(sys.path))\"")
     if exitCode == 0:
       for line in output.strip().splitLines():
         let p = line.strip()
-        if p.len > 0 and dirExists(p):
+        if p.len == 0:
+          pythonSearchPaths.add(getCurrentDir())
+        elif dirExists(p):
           pythonSearchPaths.add(p)
   except OSError:
     discard
@@ -948,8 +950,14 @@ proc parseImports(text: string, packageDir: string = ""): seq[ImportInfo] =
         result.add(ImportInfo(module: module, name: "", alias: alias))
     inc i
 
+var parseClassesCacheLen: int
+var parseClassesCacheResult: seq[ClassInfo]
+var parseClassesCacheText: string
+
 proc parseClasses(text: string): seq[ClassInfo] =
   ## Extract class definitions with their base classes
+  if text.len == parseClassesCacheLen and text == parseClassesCacheText:
+    return parseClassesCacheResult
   let lines = text.split('\n')
   for i in 0..<lines.len:
     let stripped = lines[i].strip()
@@ -990,6 +998,9 @@ proc parseClasses(text: string): seq[ClassInfo] =
         name: className, bases: bases,
         bodyStartLine: i + 1, bodyIndent: bodyIndent
       ))
+  parseClassesCacheLen = text.len
+  parseClassesCacheText = text
+  parseClassesCacheResult = result
 
 var modulePathCache: Table[string, string]
 
@@ -1010,17 +1021,6 @@ proc resolveModulePath(moduleName: string): string =
     if fileExists(asPackage):
       modulePathCache[moduleName] = asPackage
       return asPackage
-  # Fallback: ask Python
-  try:
-    let (output, exitCode) = execCmdEx(
-      "python3 -c \"import " & moduleName & "; print(" & moduleName & ".__file__)\"")
-    if exitCode == 0:
-      let p = output.strip()
-      if p.len > 0 and fileExists(p):
-        modulePathCache[moduleName] = p
-        return p
-  except OSError:
-    discard
   modulePathCache[moduleName] = ""
   return ""
 
@@ -1252,23 +1252,31 @@ proc findMemberTransitive(className: string, memberName: string,
     visitedPaths.incl(modulePath)
     let moduleText = readFile(modulePath)
     let moduleImports = parseImports(moduleText, parentDir(modulePath))
+    # Check if class is defined directly in this module
+    var visited: HashSet[string]
+    let (fp, ml, mc) = findMemberWithMRO(
+      moduleText, className, memberName, moduleImports, visited)
+    if ml >= 0:
+      let resultPath = if fp.len > 0: fp else: modulePath
+      return (resultPath, ml, mc)
+    # Check sub-imports of this module
     for mImp in moduleImports:
       let mTarget = if mImp.alias.len > 0: mImp.alias else: mImp.name
       if mTarget == className and mImp.name.len > 0:
         let mPath = resolveModulePath(mImp.module)
-        if mPath.len > 0:
+        if mPath.len > 0 and mPath notin visitedPaths:
           let mText = readFile(mPath)
-          var visited: HashSet[string]
-          let (fp, ml, mc) = findMemberWithMRO(
+          var visited2: HashSet[string]
+          let (fp2, ml2, mc2) = findMemberWithMRO(
             mText, mImp.name, memberName,
-            parseImports(mText, parentDir(mPath)), visited)
-          if ml >= 0:
-            let resultPath = if fp.len > 0: fp else: mPath
-            return (resultPath, ml, mc)
+            parseImports(mText, parentDir(mPath)), visited2)
+          if ml2 >= 0:
+            let resultPath = if fp2.len > 0: fp2 else: mPath
+            return (resultPath, ml2, mc2)
     # Recurse into this module's imports
-    let (fp, ml, mc) = findMemberTransitive(
+    let (rfp, rml, rmc) = findMemberTransitive(
       className, memberName, moduleImports, visitedPaths)
-    if ml >= 0: return (fp, ml, mc)
+    if rml >= 0: return (rfp, rml, rmc)
   return ("", -1, -1)
 
 proc findEnclosingClass(text: string, useLine: int): string =
