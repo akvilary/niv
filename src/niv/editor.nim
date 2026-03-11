@@ -13,6 +13,7 @@ import mode_command
 import mode_explore
 import mode_lsp_manager
 import mode_git
+import mode_find
 import lsp_manager
 import lsp_client
 import lsp_types
@@ -390,6 +391,8 @@ proc run*(state: var EditorState) =
         handleLspManagerMode(state, key)
       of mGit:
         handleGitMode(state, key)
+      of mFind:
+        handleFindMode(state, key)
 
       # Pause/resume file loader on insert mode transitions
       if state.mode != prevMode:

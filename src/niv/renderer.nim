@@ -532,15 +532,7 @@ proc renderGitPanel(buf: var ScreenBuffer, state: EditorState, panelHeight: int)
     let contentRows = panelHeight - 3
     let helpLine = " Enter:checkout  Ctrl+f:fetch  Ctrl+l:pull  Ctrl+p:push  Esc:back  \xe2\x86\x91\xe2\x86\x93:navigate"
 
-    # Search input line
-    buf.move(1, 0)
-    buf.resetColors()
-    buf.setFg(colCyan)
-    buf.write(" Search: ")
-    buf.resetFg()
-    buf.write($gp.branchQuery)
-    buf.write("\xe2\x96\x8e")  # ▎ cursor indicator
-    buf.clearToEol()
+    buf.renderSearchInput(1, $gp.branchQuery, colCyan, colGutter)
 
     var scrollOff = gp.branchScrollOffset
     if gp.branchCursorIndex < scrollOff:
@@ -701,6 +693,7 @@ proc renderStatusLine(buf: var ScreenBuffer, state: EditorState, totalWidth: int
     of mExplore: " EXPLORE "
     of mLspManager: " LSP "
     of mGit: " GIT "
+    of mFind: " FIND "
 
   # Status line (row 0)
   buf.move(0, 0)
@@ -763,10 +756,157 @@ proc renderStatusLine(buf: var ScreenBuffer, state: EditorState, totalWidth: int
       buf.write(branchLeft & spaces(cmdGap) & diffRight)
   buf.clearToEol()
 
+var findBuf: ScreenBuffer
+
+proc renderFind(buf: var ScreenBuffer, state: EditorState, totalWidth, totalHeight: int) =
+  let fs = state.findState
+  let queryStr = $fs.query
+  let listWidth = min(totalWidth div 3, 60)
+  let previewWidth = totalWidth - listWidth - 1
+  let contentRows = totalHeight - 3  # search + separator + help
+  let helpLine = " Enter:open  \xe2\x86\x91\xe2\x86\x93:navigate  Ctrl+s:match case  Ctrl+d:dir scope  Esc:close"
+
+  var hint = ""
+  if fs.caseSensitive: hint.add("Aa")
+  if fs.searchDir.len > 0:
+    if hint.len > 0: hint.add("  ")
+    hint.add("dir scope")
+  if fs.results.len > 0:
+    if hint.len > 0: hint.add("  ")
+    hint.add($fs.results.len & " matches")
+  buf.renderSearchInput(0, queryStr, colCyan, colGutter, hint)
+
+  # Adjust scroll to keep cursor visible
+  var scrollOff = fs.scrollOffset
+  if fs.cursorIndex < scrollOff:
+    scrollOff = fs.cursorIndex
+  elif fs.cursorIndex >= scrollOff + contentRows:
+    scrollOff = fs.cursorIndex - contentRows + 1
+
+  let queryMatch = if fs.caseSensitive: queryStr else: queryStr.toLower()
+
+  for row in 0..<contentRows:
+    let idx = scrollOff + row
+
+    # Left pane: results list
+    buf.move(1 + row, 0)
+    buf.resetColors()
+
+    if idx < fs.results.len:
+      let m = fs.results[idx]
+      let isSelected = idx == fs.cursorIndex
+
+      if isSelected:
+        buf.setBg(colCursorLn)
+
+      let entry = " " & m.filePath & ":" & $(m.line + 1)
+      # Right-align: clip left side, hScroll shifts view
+      let overflow = max(0, entry.len - listWidth)
+      let shift = -(overflow - fs.listHScroll)
+      buf.move(1 + row, shift)
+
+      buf.setFg(colBlue)
+      buf.write(" " & m.filePath)
+      buf.setFg(colGutter)
+      buf.write(":" & $(m.line + 1))
+      buf.resetFg()
+
+      if buf.curCol < 0:
+        buf.curCol = 0
+      if isSelected:
+        while buf.curCol < listWidth:
+          buf.write(" ")
+        buf.resetColors()
+
+    while buf.curCol < listWidth:
+      buf.write(" ")
+
+    # Separator
+    buf.move(1 + row, listWidth)
+    buf.resetColors()
+    buf.setFg(colGutter)
+    buf.write("\xe2\x94\x82")  # │
+    buf.resetFg()
+
+    # Right pane: preview
+    buf.move(1 + row, listWidth + 1)
+    buf.resetColors()
+
+    if fs.previewLines.len > 0 and fs.results.len > 0 and row < fs.previewLines.len:
+      let fileLine = fs.previewStartLine + row
+      let isMatchLine = fs.cursorIndex < fs.results.len and
+                        fileLine == fs.results[fs.cursorIndex].line
+
+      # Line number
+      let lnStr = $(fileLine + 1)
+      let lnPad = 5 - lnStr.len
+      if isMatchLine:
+        buf.setFg(colCyan)
+      else:
+        buf.setFg(colGutter)
+      buf.write(spaces(max(0, lnPad)) & lnStr & " ")
+      buf.resetFg()
+
+      if isMatchLine:
+        buf.setBg(colCursorLn)
+
+      # Content with search highlight
+      let pLine = fs.previewLines[row]
+      let maxChars = previewWidth - 7
+      let displayLine = if pLine.len > maxChars: pLine[0..<maxChars] else: pLine
+
+      if queryMatch.len > 0:
+        let lineSearch = if fs.caseSensitive: displayLine else: displayLine.toLower()
+        var searchPos = 0
+        while searchPos < lineSearch.len:
+          let found = lineSearch.find(queryMatch, searchPos)
+          if found < 0:
+            buf.write(displayLine[searchPos..^1])
+            break
+          if found > searchPos:
+            buf.write(displayLine[searchPos..<found])
+          buf.setBg(colSearchBg)
+          buf.write(displayLine[found..<found + queryMatch.len])
+          if isMatchLine: buf.setBg(colCursorLn) else: buf.resetBg()
+          searchPos = found + queryMatch.len
+      else:
+        buf.write(displayLine)
+
+      buf.clearToEol()
+      buf.resetColors()
+    else:
+      buf.clearToEol()
+
+  # Separator line
+  buf.move(1 + contentRows, 0)
+  buf.resetColors()
+  buf.setFg(colGutter)
+  for c in 0..<totalWidth:
+    buf.write("\xe2\x94\x80")  # ─
+  buf.resetFg()
+
+  # Help line
+  buf.move(2 + contentRows, 0)
+  buf.resetColors()
+  buf.setFg(colGutter)
+  buf.write(helpLine)
+  buf.clearToEol()
+  buf.resetFg()
+
 proc render*(state: EditorState) =
   let size = getTerminalSize()
   let totalWidth = size.width
   let height = size.height
+
+  # Find mode: full-screen takeover
+  if state.mode == mFind:
+    hideCursor()
+    findBuf.resize(totalWidth, height)
+    renderFind(findBuf, state, totalWidth, height)
+    findBuf.blit(1, 1)
+    hideCursor()
+    flushOut()
+    return
 
   let sidebarVisible = state.sidebar.visible
   let colOffset = if sidebarVisible: state.sidebar.width + 1 else: 0

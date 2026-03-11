@@ -63,6 +63,15 @@ proc handleNormalMode*(state: var EditorState, key: InputKey) =
       state.gitPanel.view = gvBranches
       state.mode = mGit
       return
+    of Rune(ord('f')):
+      state.findState.query = @[]
+      state.findState.results = @[]
+      state.findState.cursorIndex = 0
+      state.findState.scrollOffset = 0
+      state.findState.previewLines = @[]
+      state.findState.searched = false
+      state.mode = mFind
+      return
     else:
       discard
 

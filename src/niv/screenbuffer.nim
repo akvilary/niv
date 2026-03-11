@@ -112,6 +112,24 @@ proc clearToEol*(buf: var ScreenBuffer) =
     buf.cells[idx] = Cell(ch: " ", fg: buf.curFg, bg: buf.curBg)
   buf.curCol = buf.width
 
+proc renderSearchInput*(buf: var ScreenBuffer, row: int, query: string,
+                         labelColor, hintColor: int, hint: string = "") =
+  ## Render a search input line: " Search: query▎" with hint at right edge
+  buf.move(row, 0)
+  buf.resetColors()
+  buf.setFg(labelColor)
+  buf.write(" Search: ")
+  buf.resetFg()
+  buf.write(query)
+  buf.write("\xe2\x96\x8e")  # ▎ cursor indicator
+  buf.clearToEol()
+  if hint.len > 0:
+    let hintStr = hint & " "
+    buf.move(row, buf.width - hintStr.len)
+    buf.setFg(hintColor)
+    buf.write(hintStr)
+    buf.resetFg()
+
 proc blit*(buf: ScreenBuffer, screenRow, screenCol: int) =
   ## Output buffer contents to terminal at given screen position (1-indexed).
   for row in 0..<buf.height:

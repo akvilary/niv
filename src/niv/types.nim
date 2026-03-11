@@ -33,6 +33,7 @@ type
     mExplore
     mLspManager
     mGit
+    mFind
 
   Position* = object
     line*: int      # 0-indexed
@@ -174,6 +175,24 @@ type
     line*: int
     col*: int
 
+  FindMatch* = object
+    filePath*: string
+    line*: int        ## 0-indexed line number
+    col*: int         ## 0-indexed column
+    lineText*: string ## the matching line content
+
+  FindState* = object
+    query*: seq[Rune]
+    results*: seq[FindMatch]
+    cursorIndex*: int
+    scrollOffset*: int
+    previewLines*: seq[string]
+    previewStartLine*: int  ## file line number where preview starts
+    searched*: bool         ## true after first search
+    searchDir*: string      ## directory to search in ("" = cwd)
+    listHScroll*: int       ## horizontal scroll for file list
+    caseSensitive*: bool    ## case-sensitive search
+
   EditorState* = object
     buffer*: Buffer
     cursor*: Position
@@ -193,6 +212,7 @@ type
     searchMatches*: seq[SearchMatch]
     searchIndex*: int
     searchInput*: bool
+    findState*: FindState
 
 proc noKey*(): InputKey =
   InputKey(kind: kkNone)
