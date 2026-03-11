@@ -1140,31 +1140,65 @@ proc findDefinitionInText(text: string, word: string): (int, int) =
           return (i, col)
   return (-1, -1)
 
-proc findMethodInClassBody(text: string, classInfo: ClassInfo, methodName: string): (int, int) =
-  ## Search for `def methodName` inside a specific class body
+proc findMemberInClassBody(text: string, classInfo: ClassInfo, memberName: string): (int, int) =
+  ## Search for method (def name) or attribute (self.name/cls.name/class-level) in class body
   let lines = text.split('\n')
-  let defPattern = "def " & methodName
+  let defPattern = "def " & memberName
+  let selfPattern = "self." & memberName
+  let clsPattern = "cls." & memberName
+
   for i in classInfo.bodyStartLine..<lines.len:
     let ln = lines[i]
-    # Measure indent
     var indent = 0
     for c in ln:
       if c == ' ': inc indent
       elif c == '\t': indent += 4
       else: break
-    # Stop if indent drops to or below class definition level
     let stripped = ln.strip()
     if stripped.len > 0 and indent < classInfo.bodyIndent:
       break
+
+    # Method: def memberName(
     if stripped.startsWith(defPattern):
       let afterLen = defPattern.len
       if afterLen >= stripped.len or stripped[afterLen] in {'(', ':', ' ', '\t'}:
         let col = ln.find(defPattern)
         if col >= 0:
           return (i, col + 4)  # +4 to skip "def "
+
+    # Attribute assignment: self.memberName = / self.memberName: / cls.memberName = / cls.memberName:
+    for pattern in [selfPattern, clsPattern]:
+      let idx = stripped.find(pattern)
+      if idx >= 0:
+        let afterLen = idx + pattern.len
+        if afterLen < stripped.len and
+           stripped[afterLen] notin {'a'..'z', 'A'..'Z', '0'..'9', '_'}:
+          # Must be an assignment or annotation, not just usage
+          let rest = stripped[afterLen..^1].strip()
+          if rest.len > 0 and rest[0] in {'=', ':'}:
+            if rest[0] == '=' and rest.len > 1 and rest[1] == '=':
+              discard  # == is comparison, skip
+            else:
+              let colInLine = ln.find(pattern)
+              if colInLine >= 0:
+                let dotPos = pattern.find('.')
+                return (i, colInLine + dotPos + 1)
+
+    # Class-level attribute: memberName = ... or memberName: type
+    if indent == classInfo.bodyIndent and stripped.startsWith(memberName):
+      let afterLen = memberName.len
+      if afterLen < stripped.len and
+         stripped[afterLen] notin {'a'..'z', 'A'..'Z', '0'..'9', '_'}:
+        let rest = stripped[afterLen..^1].strip()
+        if rest.len > 0 and rest[0] in {'=', ':'}:
+          if rest[0] == '=' and rest.len > 1 and rest[1] == '=':
+            discard
+          else:
+            return (i, indent)
+
   return (-1, -1)
 
-proc findMethodWithMRO(text: string, className: string, methodName: string,
+proc findMemberWithMRO(text: string, className: string, methodName: string,
                         imports: seq[ImportInfo], visited: var HashSet[string],
                         depth: int = 0): (string, int, int) =
   ## Search for method in class and its bases (MRO). Returns (filePath, line, col).
@@ -1180,7 +1214,7 @@ proc findMethodWithMRO(text: string, className: string, methodName: string,
   for cls in classes:
     if cls.name == className:
       # Search in this class body
-      let (foundLine, foundCol) = findMethodInClassBody(text, cls, methodName)
+      let (foundLine, foundCol) = findMemberInClassBody(text, cls, methodName)
       if foundLine >= 0:
         return ("", foundLine, foundCol)
       # Not found → search in base classes
@@ -1189,7 +1223,7 @@ proc findMethodWithMRO(text: string, className: string, methodName: string,
         var baseFound = false
         for baseCls in classes:
           if baseCls.name == base:
-            let (fp, bl, bc) = findMethodWithMRO(text, base, methodName, imports, visited, depth + 1)
+            let (fp, bl, bc) = findMemberWithMRO(text, base, methodName, imports, visited, depth + 1)
             if bl >= 0: return (fp, bl, bc)
             baseFound = true
             break
@@ -1201,7 +1235,7 @@ proc findMethodWithMRO(text: string, className: string, methodName: string,
               let modulePath = resolveModulePath(imp.module)
               if modulePath.len > 0:
                 let moduleText = readFile(modulePath)
-                let (fp, bl, bc) = findMethodWithMRO(moduleText, imp.name, methodName, imports, visited, depth + 1)
+                let (fp, bl, bc) = findMemberWithMRO(moduleText, imp.name, methodName, imports, visited, depth + 1)
                 if bl >= 0:
                   let resultPath = if fp.len > 0: fp else: modulePath
                   return (resultPath, bl, bc)
@@ -1514,7 +1548,7 @@ proc main() =
         if className.len > 0:
           # Check if class is in current file
           var visited: HashSet[string]
-          let (resultPath, mLine, mCol) = findMethodWithMRO(
+          let (resultPath, mLine, mCol) = findMemberWithMRO(
             text, className, name, imports, visited)
           if mLine >= 0:
             if resultPath.len > 0:
@@ -1543,7 +1577,7 @@ proc main() =
                 if modulePath.len > 0:
                   let moduleText = readFile(modulePath)
                   var visited2: HashSet[string]
-                  let (fp, ml, mc) = findMethodWithMRO(
+                  let (fp, ml, mc) = findMemberWithMRO(
                     moduleText, imp.name, name, parseImports(moduleText, parentDir(modulePath)),
                     visited2)
                   if ml >= 0:
