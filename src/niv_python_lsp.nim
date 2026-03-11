@@ -52,6 +52,7 @@ type
     types: HashSet[string]
     functions: HashSet[string]
     enums: HashSet[string]
+    symbolModules: Table[string, string]  # symbolName → modulePath
 
   DocumentState = object
     uri: string
@@ -950,14 +951,8 @@ proc parseImports(text: string, packageDir: string = ""): seq[ImportInfo] =
         result.add(ImportInfo(module: module, name: "", alias: alias))
     inc i
 
-var parseClassesCacheLen: int
-var parseClassesCacheResult: seq[ClassInfo]
-var parseClassesCacheText: string
-
 proc parseClasses(text: string): seq[ClassInfo] =
   ## Extract class definitions with their base classes
-  if text.len == parseClassesCacheLen and text == parseClassesCacheText:
-    return parseClassesCacheResult
   let lines = text.split('\n')
   for i in 0..<lines.len:
     let stripped = lines[i].strip()
@@ -998,9 +993,6 @@ proc parseClasses(text: string): seq[ClassInfo] =
         name: className, bases: bases,
         bodyStartLine: i + 1, bodyIndent: bodyIndent
       ))
-  parseClassesCacheLen = text.len
-  parseClassesCacheText = text
-  parseClassesCacheResult = result
 
 var modulePathCache: Table[string, string]
 
@@ -1099,6 +1091,7 @@ proc collectKnownSymbols*(text: string, filePath: string = ""): KnownSymbols =
     let target = if imp.alias.len > 0: imp.alias else: imp.name
     let modulePath = resolveModulePath(imp.module)
     if modulePath.len > 0:
+      result.symbolModules[target] = modulePath
       let kind = findSymbolInModule(modulePath, imp.name)
       case kind
       of skClass: result.types.incl(target)
@@ -1732,6 +1725,7 @@ proc main() =
       var filePath = ""
       if uri.startsWith("file://"):
         filePath = uri[7..^1]
+      let known = if uri in documents: documents[uri].known else: default(KnownSymbols)
 
       let (qualifier, name) = getDefinitionContext(text, defLine, defCol)
 
@@ -1821,26 +1815,44 @@ proc main() =
           for startClass in rootClasses:
             var currentClass = startClass
             var ok = true
+            var resolvedViaImport = false
             for i in 1..<chainParts.len:
+              resolvedViaImport = false
               var visited: HashSet[string]
               let nextClass = resolveAttributeType(
                 text, currentClass, chainParts[i], imports, visited)
               if nextClass.len == 0:
                 var foundImport = false
-                for imp in imports:
-                  let target = if imp.alias.len > 0: imp.alias else: imp.name
-                  if target == currentClass and imp.name.len > 0:
-                    let modulePath = resolveModulePath(imp.module)
-                    if modulePath.len > 0:
-                      let moduleText = readFile(modulePath)
-                      var visited2: HashSet[string]
-                      let nc = resolveAttributeType(
-                        moduleText, imp.name, chainParts[i],
-                        parseImports(moduleText, parentDir(modulePath)), visited2)
-                      if nc.len > 0:
-                        currentClass = nc
-                        foundImport = true
-                        break
+                # Fast path: use cached module path from KnownSymbols
+                if currentClass in known.symbolModules:
+                  let modulePath = known.symbolModules[currentClass]
+                  if modulePath.len > 0:
+                    let moduleText = readFile(modulePath)
+                    var visited2: HashSet[string]
+                    let nc = resolveAttributeType(
+                      moduleText, currentClass, chainParts[i],
+                      parseImports(moduleText, parentDir(modulePath)), visited2)
+                    if nc.len > 0:
+                      currentClass = nc
+                      foundImport = true
+                      resolvedViaImport = true
+                if not foundImport:
+                  # Slow path: iterate imports
+                  for imp in imports:
+                    let target = if imp.alias.len > 0: imp.alias else: imp.name
+                    if target == currentClass and imp.name.len > 0:
+                      let modulePath = resolveModulePath(imp.module)
+                      if modulePath.len > 0:
+                        let moduleText = readFile(modulePath)
+                        var visited2: HashSet[string]
+                        let nc = resolveAttributeType(
+                          moduleText, imp.name, chainParts[i],
+                          parseImports(moduleText, parentDir(modulePath)), visited2)
+                        if nc.len > 0:
+                          currentClass = nc
+                          foundImport = true
+                          resolvedViaImport = true
+                          break
                 if not foundImport:
                   ok = false
                   break
@@ -1848,57 +1860,53 @@ proc main() =
                 currentClass = nextClass
 
             if ok and currentClass.len > 0:
-              var visited: HashSet[string]
-              let (fp, ml, mc) = findMemberWithMRO(
-                text, currentClass, name, imports, visited)
-              if ml >= 0:
-                let resultUri = if fp.len > 0: "file://" & fp else: uri
-                sendResponse(id, %*{
-                  "uri": resultUri,
-                  "range": {
-                    "start": {"line": ml, "character": mc},
-                    "end": {"line": ml, "character": mc + name.len}
-                  }
-                })
-                found = true
-              else:
-                # Direct import lookup
-                for imp in imports:
-                  let target = if imp.alias.len > 0: imp.alias else: imp.name
-                  if target == currentClass and imp.name.len > 0:
-                    let modulePath = resolveModulePath(imp.module)
-                    if modulePath.len > 0:
-                      let moduleText = readFile(modulePath)
-                      var visited2: HashSet[string]
-                      let (fp2, ml2, mc2) = findMemberWithMRO(
-                        moduleText, imp.name, name,
-                        parseImports(moduleText, parentDir(modulePath)), visited2)
-                      if ml2 >= 0:
-                        let resUri = if fp2.len > 0: "file://" & fp2
-                                     else: "file://" & modulePath
-                        sendResponse(id, %*{
-                          "uri": resUri,
-                          "range": {
-                            "start": {"line": ml2, "character": mc2},
-                            "end": {"line": ml2, "character": mc2 + name.len}
-                          }
-                        })
-                        found = true
-                        break
-                # Transitive import lookup
-                if not found:
-                  var visitedPaths: HashSet[string]
-                  let (fp3, ml3, mc3) = findMemberTransitive(
-                    currentClass, name, imports, visitedPaths)
-                  if ml3 >= 0:
-                    sendResponse(id, %*{
-                      "uri": "file://" & fp3,
-                      "range": {
-                        "start": {"line": ml3, "character": mc3},
-                        "end": {"line": ml3, "character": mc3 + name.len}
-                      }
-                    })
-                    found = true
+              if not resolvedViaImport:
+                # Class likely in current file — search here first
+                var visited: HashSet[string]
+                let (fp, ml, mc) = findMemberWithMRO(
+                  text, currentClass, name, imports, visited)
+                if ml >= 0:
+                  let resultUri = if fp.len > 0: "file://" & fp else: uri
+                  sendResponse(id, %*{
+                    "uri": resultUri,
+                    "range": {
+                      "start": {"line": ml, "character": mc},
+                      "end": {"line": ml, "character": mc + name.len}
+                    }
+                  })
+                  found = true
+              if not found and currentClass in known.symbolModules:
+                let modulePath = known.symbolModules[currentClass]
+                let moduleText = readFile(modulePath)
+                var visited2: HashSet[string]
+                let (fp2, ml2, mc2) = findMemberWithMRO(
+                  moduleText, currentClass, name,
+                  parseImports(moduleText, parentDir(modulePath)), visited2)
+                if ml2 >= 0:
+                  let resUri = if fp2.len > 0: "file://" & fp2
+                               else: "file://" & modulePath
+                  sendResponse(id, %*{
+                    "uri": resUri,
+                    "range": {
+                      "start": {"line": ml2, "character": mc2},
+                      "end": {"line": ml2, "character": mc2 + name.len}
+                    }
+                  })
+                  found = true
+              # Transitive import lookup
+              if not found:
+                var visitedPaths: HashSet[string]
+                let (fp3, ml3, mc3) = findMemberTransitive(
+                  currentClass, name, imports, visitedPaths)
+                if ml3 >= 0:
+                  sendResponse(id, %*{
+                    "uri": "file://" & fp3,
+                    "range": {
+                      "start": {"line": ml3, "character": mc3},
+                      "end": {"line": ml3, "character": mc3 + name.len}
+                    }
+                  })
+                  found = true
             if found: break
 
         # super() → search base classes of enclosing class, skipping current
