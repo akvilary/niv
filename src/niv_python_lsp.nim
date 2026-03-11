@@ -2002,20 +2002,34 @@ proc main() =
 
           for startClass in rootClasses:
             var currentClass = startClass
+            var chainLines = lines
+            var chainImports = imports
+            var chainKnown = known
             var ok = true
             for i in 1..<chainParts.len:
+              # Find where currentClass is defined to get its module context
+              let (cf, _, cp) = findClassInfo(chainLines, currentClass, chainKnown, chainImports)
+              if not cf:
+                ok = false
+                break
+              let workLines = if cp.len > 0: getModuleLines(cp) else: chainLines
+              let workImports = if cp.len > 0: getModuleImports(cp) else: chainImports
+              let workKnown = if cp.len > 0: default(KnownSymbols) else: chainKnown
               var visited: HashSet[string]
               let nextClass = resolveAttributeType(
-                lines, currentClass, chainParts[i], imports, visited, known)
+                workLines, currentClass, chainParts[i], workImports, visited, workKnown)
               if nextClass.len == 0:
                 ok = false
                 break
+              chainLines = workLines
+              chainImports = workImports
+              chainKnown = workKnown
               currentClass = nextClass
 
             if ok and currentClass.len > 0:
               var visited: HashSet[string]
               let (fp, ml, mc) = findMemberWithMRO(
-                lines, currentClass, name, imports, visited, known)
+                chainLines, currentClass, name, chainImports, visited, chainKnown)
               if ml >= 0:
                 let resultUri = if fp.len > 0: "file://" & fp else: uri
                 sendResponse(id, %*{
@@ -2030,7 +2044,7 @@ proc main() =
               if not found:
                 var visitedPaths: HashSet[string]
                 let (fp3, ml3, mc3) = findMemberTransitive(
-                  currentClass, name, imports, visitedPaths)
+                  currentClass, name, chainImports, visitedPaths)
                 if ml3 >= 0:
                   sendResponse(id, %*{
                     "uri": "file://" & fp3,
