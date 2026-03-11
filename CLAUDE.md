@@ -9,6 +9,9 @@
 ## Commit Rules
 - Never add "Co-Authored-By" lines to commit messages
 
+## Maintenance Rules
+- After any LSP optimization work (tokenizer, client, server, caching, go-to-definition, etc.), review the "LSP Server Architecture" and "LSP Client Optimization" sections below for accuracy and update them to reflect the current implementation
+
 ---
 
 ## LSP Server Architecture — Optimized Algorithm
@@ -19,7 +22,7 @@ Reference implementation: `niv_python_lsp.nim`. Apply the same patterns to all n
 
 - JSON-RPC 2.0 over stdin/stdout with `Content-Length` framing
 - Parse `Content-Length:` header with direct integer extraction — no `split()/strip()` allocations
-- For responses, build JSON strings directly when possible (e.g. `sendTokensResponse` builds `{"data":[...]}` without creating JsonNode objects)
+- For responses, build JSON strings directly when possible (e.g. `sendTokensResponse` encodes tokens and builds `{"data":[...]}` in a single pass into a pre-sized string buffer — no intermediate `seq[int]` or JsonNode objects)
 
 ### Data Model
 
@@ -67,11 +70,12 @@ On `didChange`: delete current file from all caches, re-split lines, re-collect 
 2. **First-char filter** before `startsWith()` — skip lines that can't match (`if firstChar notin {'c','d','f','i'}: continue`)
 3. **Direct `inc pos` in hot loops** — identifiers, comments, numbers never contain `\n`, so skip the full `advance()` template that checks for newlines and updates 7 state variables
 4. **Preallocated token seq** — `newSeqOfCap[PythonToken](text.len div 6)` avoids repeated growth
-5. **Emit gating for range requests** — don't add tokens before `startLine` to the seq; pass `rangeStart/rangeEnd` to string token emitter
-6. **`openArray` in `encodeSemanticTokens`** — allows passing slices without copying
+5. **Full range gating** — ALL token emissions (identifiers, operators, decorators, comments, numbers, strings) gated by `sLine >= startLine`. Scope-critical branches (def/class/import/func params) always track state but gate token adds. Classification-only branches (builtins, types, properties, HashSet lookups, lookahead) skipped entirely for pre-range lines
+6. **Direct buffer encoding** — `sendTokensResponse` accepts `openArray[PythonToken]` and writes delta-encoded tokens directly into a pre-sized string buffer (`newStringOfCap`), eliminating the intermediate `seq[int]` allocation
 7. **Lightweight `scanStringDiagnostics`** for `didChange` instead of full tokenizer — only detects unterminated strings, no scope tracking or token emission
 8. **Zero-allocation char comparisons** — e.g. string prefixes `rf`, `fr`, `rb` compared as char pairs, not via string concatenation
 9. **Enum with string values for keywords** — `type Keyword = enum kwNone="", kwDef="def"` with `template ==` for zero-alloc comparisons
+10. **Simplified end filter** — with all emissions gated, only trim tokens past `endLine` via `setLen` (rare inFuncParams edge case), no seq copy
 
 ### Symbol Collection (`collectKnownSymbols`)
 
@@ -178,7 +182,8 @@ for each import in current file:
 
 ### Sending Messages
 
-- Write header and body as separate stream writes — avoids copying ~100KB body string into a concatenated header+body string
+- Write header and body as separate stream writes (both server and client) — avoids copying ~100KB body string into a concatenated header+body string
+- Semantic token responses: single-pass encode+serialize directly into pre-sized string buffer — no intermediate data structures
 - For hot path (`didChange`): consider direct string building instead of `%*{}` → `$` pipeline
 
 ### Background Highlighting

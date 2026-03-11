@@ -386,105 +386,104 @@ proc tokenizePython(text: string, startLine: int = 0, endLine: int = int.high;
         let word = text[startPos..<pos]
         let length = pos - startPos
 
-        # Classify the identifier (lastIdent updated after, so enum check sees previous ident)
+        # Classify the identifier — scope-critical branches always track state,
+        # classification-only branches gated by startLine for range requests
         if word == kwDef or word == kwClass:
-          tokens.add(PythonToken(kind: ptKeyword, line: sLine, col: sCol, length: length))
           lastKw = if word == kwDef: kwDef else: kwClass
+          if sLine >= startLine:
+            tokens.add(PythonToken(kind: ptKeyword, line: sLine, col: sCol, length: length))
         elif word == kwImport:
-          tokens.add(PythonToken(kind: ptKeyword, line: sLine, col: sCol, length: length))
           if inFromLine:
             inFromLine = false
           else:
             inImportLine = true
           lastKw = kwNone
+          if sLine >= startLine:
+            tokens.add(PythonToken(kind: ptKeyword, line: sLine, col: sCol, length: length))
         elif word == kwFrom:
-          tokens.add(PythonToken(kind: ptKeyword, line: sLine, col: sCol, length: length))
           inFromLine = true
           lastKw = kwNone
+          if sLine >= startLine:
+            tokens.add(PythonToken(kind: ptKeyword, line: sLine, col: sCol, length: length))
         elif lastKw == kwDef:
-          # Function/method name
+          # Function/method name — always track scope
           let isMethod = inClassScope()
-          if isMethod:
-            tokens.add(PythonToken(kind: ptMethod, line: sLine, col: sCol, length: length))
-            scopeStack.add(ScopeEntry(kind: skFunction, indent: lineIndent))
-          else:
-            tokens.add(PythonToken(kind: ptFunction, line: sLine, col: sCol, length: length))
-            scopeStack.add(ScopeEntry(kind: skFunction, indent: lineIndent))
+          scopeStack.add(ScopeEntry(kind: skFunction, indent: lineIndent))
           lastKw = kwNone
-          # Prepare for parameter parsing
-          inFuncParams = false  # will be set true when we see '('
+          inFuncParams = false
           funcParamDepth = 0
           isFirstParam = true
           afterParamColon = false
           expectParam = false
           expectDefParams = true
+          if sLine >= startLine:
+            tokens.add(PythonToken(kind: if isMethod: ptMethod else: ptFunction,
+                                    line: sLine, col: sCol, length: length))
         elif lastKw == kwClass:
-          tokens.add(PythonToken(kind: ptClass, line: sLine, col: sCol, length: length))
           scopeStack.add(ScopeEntry(kind: skClass, indent: lineIndent))
           lastKw = kwNone
+          if sLine >= startLine:
+            tokens.add(PythonToken(kind: ptClass, line: sLine, col: sCol, length: length))
         elif inFuncParams and not afterParamColon:
-          # Inside function parameter list
-          if (word == "self") and isFirstParam:
-            tokens.add(PythonToken(kind: ptSelfParam, line: sLine, col: sCol, length: length))
-          elif (word == "cls") and isFirstParam:
-            tokens.add(PythonToken(kind: ptClsParam, line: sLine, col: sCol, length: length))
-          else:
-            tokens.add(PythonToken(kind: ptParameter, line: sLine, col: sCol, length: length))
+          # Inside function parameter list — always update state
+          if sLine >= startLine:
+            if (word == "self") and isFirstParam:
+              tokens.add(PythonToken(kind: ptSelfParam, line: sLine, col: sCol, length: length))
+            elif (word == "cls") and isFirstParam:
+              tokens.add(PythonToken(kind: ptClsParam, line: sLine, col: sCol, length: length))
+            else:
+              tokens.add(PythonToken(kind: ptParameter, line: sLine, col: sCol, length: length))
           expectParam = false
           isFirstParam = false
-        elif inImportLine and not inFromLine:
-          # Module name after bare 'import'
-          tokens.add(PythonToken(kind: ptNamespace, line: sLine, col: sCol, length: length))
-        elif inFromLine:
-          # Module name after 'from'
-          tokens.add(PythonToken(kind: ptNamespace, line: sLine, col: sCol, length: length))
-        elif wasDot:
-          # Identifier after dot → enum member, method call, or property
-          if lastIdent in known.enums:
+        # Classification-only branches — skip entirely for pre-range lines
+        elif sLine >= startLine:
+          if inImportLine and not inFromLine:
+            tokens.add(PythonToken(kind: ptNamespace, line: sLine, col: sCol, length: length))
+          elif inFromLine:
+            tokens.add(PythonToken(kind: ptNamespace, line: sLine, col: sCol, length: length))
+          elif wasDot:
+            if lastIdent in known.enums:
+              tokens.add(PythonToken(kind: ptBuiltinConst, line: sLine, col: sCol, length: length))
+            else:
+              var lookPos = pos
+              while lookPos < text.len and text[lookPos] in {' ', '\t'}:
+                inc lookPos
+              if lookPos < text.len and text[lookPos] == '(':
+                tokens.add(PythonToken(kind: ptFunction, line: sLine, col: sCol, length: length))
+              else:
+                tokens.add(PythonToken(kind: ptProperty, line: sLine, col: sCol, length: length))
+          elif callDepth > 0 and (block:
+            var lp = pos
+            while lp < text.len and text[lp] in {' ', '\t'}: inc lp
+            lp < text.len and text[lp] == '=' and
+              (lp + 1 >= text.len or text[lp + 1] != '=')):
+            tokens.add(PythonToken(kind: ptParameter, line: sLine, col: sCol, length: length))
+          elif word in builtinConstSet:
             tokens.add(PythonToken(kind: ptBuiltinConst, line: sLine, col: sCol, length: length))
+          elif word in kwOperatorSet:
+            tokens.add(PythonToken(kind: ptOperator, line: sLine, col: sCol, length: length))
+          elif word in keywordSet:
+            tokens.add(PythonToken(kind: ptKeyword, line: sLine, col: sCol, length: length))
+          elif word in builtinTypeSet:
+            tokens.add(PythonToken(kind: ptType, line: sLine, col: sCol, length: length))
+          elif word in builtinFuncSet:
+            tokens.add(PythonToken(kind: ptBuiltin, line: sLine, col: sCol, length: length))
+          elif word in selfParamSet:
+            tokens.add(PythonToken(kind: ptSelfParam, line: sLine, col: sCol, length: length))
+          elif word in known.types:
+            tokens.add(PythonToken(kind: ptType, line: sLine, col: sCol, length: length))
+          elif word in known.functions:
+            tokens.add(PythonToken(kind: ptFunction, line: sLine, col: sCol, length: length))
           else:
             var lookPos = pos
             while lookPos < text.len and text[lookPos] in {' ', '\t'}:
               inc lookPos
             if lookPos < text.len and text[lookPos] == '(':
               tokens.add(PythonToken(kind: ptFunction, line: sLine, col: sCol, length: length))
-            else:
-              tokens.add(PythonToken(kind: ptProperty, line: sLine, col: sCol, length: length))
-        elif callDepth > 0 and (block:
-          var lp = pos
-          while lp < text.len and text[lp] in {' ', '\t'}: inc lp
-          lp < text.len and text[lp] == '=' and
-            (lp + 1 >= text.len or text[lp + 1] != '=')):
-          # Keyword argument: identifier= inside function call (not ==)
-          tokens.add(PythonToken(kind: ptParameter, line: sLine, col: sCol, length: length))
-        elif word in builtinConstSet:
-          tokens.add(PythonToken(kind: ptBuiltinConst, line: sLine, col: sCol, length: length))
-        elif word in kwOperatorSet:
-          tokens.add(PythonToken(kind: ptOperator, line: sLine, col: sCol, length: length))
-        elif word in keywordSet:
-          tokens.add(PythonToken(kind: ptKeyword, line: sLine, col: sCol, length: length))
-        elif word in builtinTypeSet:
-          tokens.add(PythonToken(kind: ptType, line: sLine, col: sCol, length: length))
-        elif word in builtinFuncSet:
-          tokens.add(PythonToken(kind: ptBuiltin, line: sLine, col: sCol, length: length))
-        elif word in selfParamSet:
-          tokens.add(PythonToken(kind: ptSelfParam, line: sLine, col: sCol, length: length))
-        elif word in known.types:
-          tokens.add(PythonToken(kind: ptType, line: sLine, col: sCol, length: length))
-        elif word in known.functions:
-          tokens.add(PythonToken(kind: ptFunction, line: sLine, col: sCol, length: length))
-        else:
-          # Lookahead: identifier followed by '(' → function call
-          var lookPos = pos
-          while lookPos < text.len and text[lookPos] in {' ', '\t'}:
-            inc lookPos
-          if lookPos < text.len and text[lookPos] == '(':
-            tokens.add(PythonToken(kind: ptFunction, line: sLine, col: sCol, length: length))
-          elif isDunder(word):
-            tokens.add(PythonToken(kind: ptDunder, line: sLine, col: sCol, length: length))
-          elif isUpperConst(word):
-            tokens.add(PythonToken(kind: ptBuiltinConst, line: sLine, col: sCol, length: length))
-          lastKw = kwNone
+            elif isDunder(word):
+              tokens.add(PythonToken(kind: ptDunder, line: sLine, col: sCol, length: length))
+            elif isUpperConst(word):
+              tokens.add(PythonToken(kind: ptBuiltinConst, line: sLine, col: sCol, length: length))
         lastIdent = word
 
     # Regular strings
@@ -571,7 +570,8 @@ proc tokenizePython(text: string, startLine: int = 0, endLine: int = int.high;
       let sLine = line
       let sCol = col
       advance()
-      tokens.add(PythonToken(kind: ptDecorator, line: sLine, col: sCol, length: 1))
+      if sLine >= startLine:
+        tokens.add(PythonToken(kind: ptDecorator, line: sLine, col: sCol, length: 1))
 
     # Parentheses (track function definition params and call depth)
     of '(':
@@ -640,8 +640,7 @@ proc tokenizePython(text: string, startLine: int = 0, endLine: int = int.high;
         advance(); inc length
       if inFuncParams and funcParamDepth == 1:
         expectParam = true
-        # Don't emit operator for * / ** in param list
-      else:
+      elif sLine >= startLine:
         tokens.add(PythonToken(kind: ptOperator, line: sLine, col: sCol, length: length))
 
     # Operators
@@ -652,9 +651,8 @@ proc tokenizePython(text: string, startLine: int = 0, endLine: int = int.high;
       if pos < text.len and text[pos] == '=':
         advance(); inc length
       if inFuncParams and funcParamDepth == 1 and length == 1:
-        # Default value assignment in params
-        afterParamColon = true  # skip default value tokens as params
-      else:
+        afterParamColon = true
+      elif sLine >= startLine:
         tokens.add(PythonToken(kind: ptOperator, line: sLine, col: sCol, length: length))
     of '!':
       lastKw = kwNone; afterDot = false
@@ -662,28 +660,32 @@ proc tokenizePython(text: string, startLine: int = 0, endLine: int = int.high;
       advance(); var length = 1
       if pos < text.len and text[pos] == '=':
         advance(); inc length
-      tokens.add(PythonToken(kind: ptOperator, line: sLine, col: sCol, length: length))
+      if sLine >= startLine:
+        tokens.add(PythonToken(kind: ptOperator, line: sLine, col: sCol, length: length))
     of '<':
       lastKw = kwNone; afterDot = false
       let sLine = line; let sCol = col
       advance(); var length = 1
       if pos < text.len and text[pos] in {'=', '<'}:
         advance(); inc length
-      tokens.add(PythonToken(kind: ptOperator, line: sLine, col: sCol, length: length))
+      if sLine >= startLine:
+        tokens.add(PythonToken(kind: ptOperator, line: sLine, col: sCol, length: length))
     of '>':
       lastKw = kwNone; afterDot = false
       let sLine = line; let sCol = col
       advance(); var length = 1
       if pos < text.len and text[pos] in {'=', '>'}:
         advance(); inc length
-      tokens.add(PythonToken(kind: ptOperator, line: sLine, col: sCol, length: length))
+      if sLine >= startLine:
+        tokens.add(PythonToken(kind: ptOperator, line: sLine, col: sCol, length: length))
     of '+', '%', '&', '|', '^', '~':
       lastKw = kwNone; afterDot = false
       let sLine = line; let sCol = col
       advance(); var length = 1
       if pos < text.len and text[pos] == '=':
         advance(); inc length
-      tokens.add(PythonToken(kind: ptOperator, line: sLine, col: sCol, length: length))
+      if sLine >= startLine:
+        tokens.add(PythonToken(kind: ptOperator, line: sLine, col: sCol, length: length))
     of '-':
       lastKw = kwNone; afterDot = false
       let sLine = line; let sCol = col
@@ -692,7 +694,8 @@ proc tokenizePython(text: string, startLine: int = 0, endLine: int = int.high;
         advance(); inc length
       elif pos < text.len and text[pos] == '=':
         advance(); inc length
-      tokens.add(PythonToken(kind: ptOperator, line: sLine, col: sCol, length: length))
+      if sLine >= startLine:
+        tokens.add(PythonToken(kind: ptOperator, line: sLine, col: sCol, length: length))
     of '/':
       lastKw = kwNone; afterDot = false
       let sLine = line; let sCol = col
@@ -703,7 +706,8 @@ proc tokenizePython(text: string, startLine: int = 0, endLine: int = int.high;
           advance(); inc length
       elif pos < text.len and text[pos] == '=':
         advance(); inc length
-      tokens.add(PythonToken(kind: ptOperator, line: sLine, col: sCol, length: length))
+      if sLine >= startLine:
+        tokens.add(PythonToken(kind: ptOperator, line: sLine, col: sCol, length: length))
 
     # Brackets and other punctuation — skip
     of '[', ']', '{', '}', ';', '\\':
@@ -713,27 +717,28 @@ proc tokenizePython(text: string, startLine: int = 0, endLine: int = int.high;
       lastKw = kwNone; afterDot = false
       advance()
 
-  if tokens.len > 0:
-    # Filter tokens to requested range [startLine, endLine]
-    var lo = 0
-    while lo < tokens.len and tokens[lo].line < startLine: inc lo
+  # Trim tokens past endLine (rare: only when inFuncParams spans past endLine)
+  if tokens.len > 0 and tokens[^1].line > endLine:
     var hi = tokens.len - 1
-    while hi >= lo and tokens[hi].line > endLine: dec hi
-    if lo > 0 or hi < tokens.len - 1:
-      if hi >= lo:
-        tokens = tokens[lo..hi]
-      else:
-        tokens = @[]
+    while hi >= 0 and tokens[hi].line > endLine: dec hi
+    tokens.setLen(hi + 1)
   return (tokens, diags)
 
 # ---------------------------------------------------------------------------
 # Semantic Token Encoding (LSP delta encoding)
 # ---------------------------------------------------------------------------
 
-proc encodeSemanticTokens(tokens: openArray[PythonToken]): seq[int] =
-  result = newSeqOfCap[int](tokens.len * 5)
+proc sendTokensResponse(id: JsonNode, tokens: openArray[PythonToken]) =
+  ## Encode semantic tokens and send response in a single pass.
+  ## Writes delta-encoded tokens directly into the output string buffer,
+  ## eliminating the intermediate seq[int] allocation.
+  var body = newStringOfCap(tokens.len * 15 + 100)
+  body.add("""{"jsonrpc":"2.0","id":""")
+  body.add($id)
+  body.add(""","result":{"data":[""")
   var prevLine = 0
   var prevCol = 0
+  var first = true
   for tok in tokens:
     let deltaLine = tok.line - prevLine
     let deltaCol = if deltaLine == 0: tok.col - prevCol else: tok.col
@@ -756,13 +761,23 @@ proc encodeSemanticTokens(tokens: openArray[PythonToken]): seq[int] =
       of ptNamespace: stNamespace
       of ptBuiltinConst: stBuiltinConst
       of ptDunder: stDunder
-    result.add(deltaLine)
-    result.add(deltaCol)
-    result.add(tok.length)
-    result.add(tokenType)
-    result.add(0)  # no modifiers
+    if not first: body.add(',')
+    first = false
+    body.addInt(deltaLine)
+    body.add(',')
+    body.addInt(deltaCol)
+    body.add(',')
+    body.addInt(tok.length)
+    body.add(',')
+    body.addInt(tokenType)
+    body.add(",0")
     prevLine = tok.line
     prevCol = tok.col
+  body.add("]}}")
+  let header = "Content-Length: " & $body.len & "\r\n\r\n"
+  stdout.write(header)
+  stdout.write(body)
+  stdout.flushFile()
 
 # ---------------------------------------------------------------------------
 # LSP Protocol I/O
@@ -779,10 +794,12 @@ proc readMessage(): string =
     if line.len == 0:
       break
     if line.startsWith("Content-Length:"):
-      try:
-        contentLength = parseInt(line.split(':')[1].strip())
-      except ValueError:
-        discard
+      var p = 15  # after "Content-Length:"
+      while p < line.len and line[p] == ' ': inc p
+      contentLength = 0
+      while p < line.len and line[p] in {'0'..'9'}:
+        contentLength = contentLength * 10 + (ord(line[p]) - ord('0'))
+        inc p
   if contentLength <= 0:
     return ""
   var buf = newString(contentLength)
@@ -793,7 +810,9 @@ proc readMessage(): string =
 
 proc sendMessage(msg: JsonNode) =
   let body = $msg
-  stdout.write("Content-Length: " & $body.len & "\r\n\r\n" & body)
+  let header = "Content-Length: " & $body.len & "\r\n\r\n"
+  stdout.write(header)
+  stdout.write(body)
   stdout.flushFile()
 
 proc sendResponse(id: JsonNode, resultNode: JsonNode) =
@@ -803,16 +822,6 @@ proc sendResponse(id: JsonNode, resultNode: JsonNode) =
     "result": resultNode
   })
 
-proc sendTokensResponse(id: JsonNode, data: seq[int]) =
-  ## Send semantic tokens response with direct string building.
-  ## Avoids creating millions of JNode objects for the data array.
-  var body = """{"jsonrpc":"2.0","id":""" & $id & ""","result":{"data":["""
-  for i, v in data:
-    if i > 0: body.add(',')
-    body.addInt(v)
-  body.add("]}}")
-  stdout.write("Content-Length: " & $body.len & "\r\n\r\n" & body)
-  stdout.flushFile()
 
 proc sendNotification(meth: string, params: JsonNode) =
   sendMessage(%*{
@@ -2053,8 +2062,7 @@ proc main() =
       let text = if uri in documents: documents[uri].text else: ""
       let knsyms = if uri in documents: documents[uri].known else: default(KnownSymbols)
       let (tokens, _) = tokenizePython(text, known = knsyms)
-      let data = encodeSemanticTokens(tokens)
-      sendTokensResponse(id, data)
+      sendTokensResponse(id, tokens)
 
     of "textDocument/semanticTokens/range":
       let params = msg["params"]
@@ -2065,8 +2073,7 @@ proc main() =
       let text = if uri in documents: documents[uri].text else: ""
       let knsyms = if uri in documents: documents[uri].known else: default(KnownSymbols)
       let (tokens, _) = tokenizePython(text, startLine, endLine, knsyms)
-      let data = encodeSemanticTokens(tokens)
-      sendTokensResponse(id, data)
+      sendTokensResponse(id, tokens)
 
     of "textDocument/definition":
       let params = msg["params"]
