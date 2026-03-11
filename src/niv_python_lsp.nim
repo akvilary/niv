@@ -1543,8 +1543,65 @@ proc main() =
         let packageDir = if filePath.len > 0: parentDir(filePath) else: ""
         let imports = parseImports(text, packageDir)
 
-        # First: try to resolve qualifier as a type and do MRO-based method search
-        let className = resolveQualifierType(text, qualifier, defLine)
+        # super() → search base classes of enclosing class, skipping current
+        if qualifier == "super":
+          let enclosingClass = findEnclosingClass(text, defLine)
+          if enclosingClass.len > 0:
+            let classes = parseClasses(text)
+            for cls in classes:
+              if cls.name == enclosingClass:
+                for base in cls.bases:
+                  var visited: HashSet[string]
+                  let (fp, ml, mc) = findMemberWithMRO(
+                    text, base, name, imports, visited)
+                  if ml >= 0:
+                    if fp.len > 0:
+                      sendResponse(id, %*{
+                        "uri": "file://" & fp,
+                        "range": {
+                          "start": {"line": ml, "character": mc},
+                          "end": {"line": ml, "character": mc + name.len}
+                        }
+                      })
+                    else:
+                      sendResponse(id, %*{
+                        "uri": uri,
+                        "range": {
+                          "start": {"line": ml, "character": mc},
+                          "end": {"line": ml, "character": mc + name.len}
+                        }
+                      })
+                    found = true
+                    break
+                  # Base class might be imported
+                  for imp in imports:
+                    let target = if imp.alias.len > 0: imp.alias else: imp.name
+                    if target == base and imp.name.len > 0:
+                      let modulePath = resolveModulePath(imp.module)
+                      if modulePath.len > 0:
+                        let moduleText = readFile(modulePath)
+                        var visited2: HashSet[string]
+                        let (fp2, ml2, mc2) = findMemberWithMRO(
+                          moduleText, imp.name, name,
+                          parseImports(moduleText, parentDir(modulePath)), visited2)
+                        if ml2 >= 0:
+                          let resultUri = if fp2.len > 0: "file://" & fp2
+                                          else: "file://" & modulePath
+                          sendResponse(id, %*{
+                            "uri": resultUri,
+                            "range": {
+                              "start": {"line": ml2, "character": mc2},
+                              "end": {"line": ml2, "character": mc2 + name.len}
+                            }
+                          })
+                          found = true
+                          break
+                  if found: break
+                break
+
+        # Try to resolve qualifier as a type and do MRO-based member search
+        let className = if not found: resolveQualifierType(text, qualifier, defLine)
+                        else: ""
         if className.len > 0:
           # Check if class is in current file
           var visited: HashSet[string]
