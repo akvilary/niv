@@ -1444,30 +1444,89 @@ proc resolveAttributeType(text: string, className: string, attrName: string,
           parseImports(moduleText, parentDir(modulePath)), visited, depth + 1)
   return ""
 
+proc joinParenContent(lines: seq[string], line, col: int): (string, int) =
+  ## If cursor is inside a multiline non-call (...), join its content into
+  ## a single line and return adjusted column. Otherwise return original line/col.
+  const identChars = {'a'..'z', 'A'..'Z', '0'..'9', '_'}
+  var depth = 0
+  var openLine = -1
+  var openCol = -1
+
+  # Scan backward from cursor for unmatched '('
+  for i in countdown(min(col, lines[line].len - 1), 0):
+    if lines[line][i] == ')': inc depth
+    elif lines[line][i] == '(':
+      if depth > 0: dec depth
+      else: openLine = line; openCol = i; break
+
+  if openLine < 0:
+    for sl in countdown(line - 1, max(0, line - 100)):
+      for i in countdown(lines[sl].len - 1, 0):
+        if lines[sl][i] == ')': inc depth
+        elif lines[sl][i] == '(':
+          if depth > 0: dec depth
+          else: openLine = sl; openCol = i; break
+      if openLine >= 0: break
+
+  if openLine < 0 or openLine == line:
+    return (lines[line], col)
+  if openCol > 0 and lines[openLine][openCol - 1] in identChars:
+    return (lines[line], col)  # function call, don't join
+
+  # Find matching ')'
+  var closeLine = -1
+  var d = 1
+  for jl in openLine..<lines.len:
+    let si = if jl == openLine: openCol + 1 else: 0
+    for j in si..<lines[jl].len:
+      if lines[jl][j] == '(': inc d
+      elif lines[jl][j] == ')':
+        dec d
+        if d == 0: closeLine = jl; break
+    if closeLine >= 0: break
+  if closeLine < 0:
+    return (lines[line], col)
+
+  # Join lines, collapsing leading whitespace to single space
+  var joined = lines[openLine]
+  var newCol = col
+  for jl in openLine + 1..closeLine:
+    joined.add(' ')
+    var trim = 0
+    while trim < lines[jl].len and lines[jl][trim] in {' ', '\t'}: inc trim
+    if jl == line: newCol = joined.len + col - trim
+    joined.add(lines[jl][trim..^1])
+  return (joined, newCol)
+
 proc getDefinitionContext(text: string, line, col: int): (string, string) =
   ## Returns (qualifier, name). E.g. "json.loads" → ("json", "loads")
   ## Walks full dot chain: "self.inner.method" → ("self.inner", "method")
+  ## Treats content inside non-call parentheses as a single expression.
   let lines = text.split('\n')
   if line >= lines.len: return ("", "")
-  let ln = lines[line]
-  if col >= ln.len: return ("", "")
   const identChars = {'a'..'z', 'A'..'Z', '0'..'9', '_'}
-  if ln[col] notin identChars:
+
+  let (ln, workCol) = joinParenContent(lines, line, col)
+  if workCol >= ln.len: return ("", "")
+  if ln[workCol] notin identChars:
     return ("", "")
-  var startCol = col
+  var startCol = workCol
   while startCol > 0 and ln[startCol - 1] in identChars:
     dec startCol
-  var endCol = col
+  var endCol = workCol
   while endCol < ln.len and ln[endCol] in identChars:
     inc endCol
   let name = ln[startCol..<endCol]
 
-  # Walk backward through full dot chain
+  # Walk backward through full dot chain (whitespace-tolerant around dots)
   var parts: seq[string]
-  var pos = startCol - 1  # should be at '.' if there is a qualifier
-  while pos >= 1 and ln[pos] == '.':
-    let beforeDot = pos - 1
-    if beforeDot >= 0 and ln[beforeDot] == ')':
+  var pos = startCol - 1
+  while pos >= 0 and ln[pos] in {' ', '\t'}: dec pos  # skip space before name
+  while pos >= 0 and ln[pos] == '.':
+    var beforeDot = pos - 1
+    while beforeDot >= 0 and ln[beforeDot] in {' ', '\t'}: dec beforeDot  # skip space before dot
+    if beforeDot < 0: break
+    if ln[beforeDot] == ')':
       # ClassName(...).x or super().x — match parens
       var depth = 1
       var qPos = beforeDot - 1
@@ -1484,6 +1543,7 @@ proc getDefinitionContext(text: string, line, col: int): (string, string) =
       if ident.len == 0: break
       parts.add(ident)
       pos = cStart - 1
+      while pos >= 0 and ln[pos] in {' ', '\t'}: dec pos
     elif ln[beforeDot] in identChars:
       var qEnd = beforeDot + 1
       var qStart = beforeDot
@@ -1493,6 +1553,7 @@ proc getDefinitionContext(text: string, line, col: int): (string, string) =
       if ident.len == 0: break
       parts.add(ident)
       pos = qStart - 1
+      while pos >= 0 and ln[pos] in {' ', '\t'}: dec pos
     else:
       break
 
