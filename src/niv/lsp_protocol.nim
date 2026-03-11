@@ -2,11 +2,6 @@
 
 import std/json
 
-proc encodeMessage*(content: JsonNode): string =
-  ## Wrap a JSON-RPC message with Content-Length header
-  let body = $content
-  "Content-Length: " & $body.len & "\r\n\r\n" & body
-
 proc buildInitialize*(id: int, processId: int, rootUri: string): JsonNode =
   %*{
     "jsonrpc": "2.0",

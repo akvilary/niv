@@ -92,10 +92,12 @@ proc lspWorker(outputFd: cint) {.thread.} =
       if line.len == 0:
         break  # Empty line = end of headers
       if line.startsWith("Content-Length:"):
-        try:
-          contentLength = parseInt(line.split(':')[1].strip())
-        except ValueError:
-          discard
+        var p = 15  # after "Content-Length:"
+        while p < line.len and line[p] == ' ': inc p
+        contentLength = 0
+        while p < line.len and line[p] in {'0'..'9'}:
+          contentLength = contentLength * 10 + (ord(line[p]) - ord('0'))
+          inc p
 
     if contentLength <= 0:
       continue
@@ -106,16 +108,18 @@ proc lspWorker(outputFd: cint) {.thread.} =
       lspChannel.send(LspEvent(kind: lekServerExited, exitCode: -1))
       return
 
-    # --- Parse JSON ---
-    var msg: JsonNode
-    try:
-      msg = parseJson(body)
-    except JsonParsingError:
-      continue
+    # --- Dispatch: skip full JSON parse for responses ---
+    let idKey = "\"id\":"
+    let idIdx = body.find(idKey)
+    let hasMethodKey = body.find("\"method\":") >= 0
 
-    # --- Dispatch ---
-    if msg.hasKey("method") and not msg.hasKey("id"):
-      # Server notification
+    if hasMethodKey and idIdx < 0:
+      # Server notification — need full parse for structured data
+      var msg: JsonNode
+      try:
+        msg = parseJson(body)
+      except JsonParsingError:
+        continue
       let meth = msg["method"].getStr()
       case meth
       of "textDocument/publishDiagnostics":
@@ -141,17 +145,28 @@ proc lspWorker(outputFd: cint) {.thread.} =
       else:
         discard  # Ignore unknown notifications
 
-    elif msg.hasKey("id"):
-      # Response to our request
-      let id = msg["id"].getInt()
-      if msg.hasKey("error"):
-        let errMsg = msg["error"]["message"].getStr()
-        lspChannel.send(LspEvent(kind: lekError, errorMessage: errMsg))
-      elif msg.hasKey("result"):
+    elif idIdx >= 0:
+      # Response — extract id without full JSON parse
+      var p = idIdx + idKey.len
+      while p < body.len and body[p] in {' ', '\t'}: inc p
+      var id = 0
+      while p < body.len and body[p] in {'0'..'9'}:
+        id = id * 10 + (ord(body[p]) - ord('0'))
+        inc p
+      if body.find("\"error\":") >= 0:
+        # Error response — parse for error message (errors are small)
+        try:
+          let msg = parseJson(body)
+          let errMsg = msg["error"]["message"].getStr()
+          lspChannel.send(LspEvent(kind: lekError, errorMessage: errMsg))
+        except CatchableError:
+          lspChannel.send(LspEvent(kind: lekError, errorMessage: "Unknown error"))
+      elif body.find("\"result\":") >= 0:
+        # Success — pass raw body (avoids re-serialization of large data)
         lspChannel.send(LspEvent(
           kind: lekResponse,
           requestId: id,
-          responseJson: $msg["result"],
+          responseJson: body,
         ))
 
   lspChannel.send(LspEvent(kind: lekServerExited, exitCode: 0))
@@ -179,8 +194,10 @@ proc sendToLsp*(msg: JsonNode) =
   ## Send a JSON-RPC message to the LSP server stdin
   if lspState notin {lsStarting, lsRunning}:
     return
-  let encoded = encodeMessage(msg)
-  lspProcess.inputStream.write(encoded)
+  let body = $msg
+  let header = "Content-Length: " & $body.len & "\r\n\r\n"
+  lspProcess.inputStream.write(header)
+  lspProcess.inputStream.write(body)
   lspProcess.inputStream.flush()
 
 proc addPendingRequest*(id: int, meth: string) =

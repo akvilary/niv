@@ -107,8 +107,8 @@ proc handleLspEvents(state: var EditorState): bool =
         lspState = lsRunning
         # Parse token legend from server capabilities
         try:
-          let caps = parseJson(event.responseJson)
-          if caps.hasKey("capabilities"):
+          let caps = parseJson(event.responseJson){"result"}
+          if caps != nil and caps.hasKey("capabilities"):
             let serverCaps = caps["capabilities"]
             if serverCaps.hasKey("semanticTokensProvider"):
               lspHasSemanticTokens = true
@@ -138,7 +138,7 @@ proc handleLspEvents(state: var EditorState): bool =
         lspSendExit()
       of "textDocument/definition":
         try:
-          let resultNode = parseJson(event.responseJson)
+          let resultNode = parseJson(event.responseJson){"result"}
           # Can be Location, Location[], or null
           var locations: seq[JsonNode]
           if resultNode.kind == JArray:
@@ -242,7 +242,7 @@ proc handleLspEvents(state: var EditorState): bool =
         trySendBgHighlight()
       of "textDocument/completion":
         try:
-          let resultNode = parseJson(event.responseJson)
+          let resultNode = parseJson(event.responseJson){"result"}
           let items = if resultNode.kind == JArray: resultNode
                       elif resultNode.hasKey("items"): resultNode["items"]
                       else: newJArray()

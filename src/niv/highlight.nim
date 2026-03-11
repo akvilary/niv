@@ -46,35 +46,6 @@ proc parseLegend*(serverCapabilities: seq[string]) =
   ## Store the token type legend from the server's initialize response
   tokenLegend = serverCapabilities
 
-proc parseSemanticTokens*(data: seq[int], lineCount: int) =
-  ## Decode delta-encoded semantic tokens into per-line lists
-  semanticLines = newSeq[seq[SemanticToken]](lineCount)
-
-  var currentLine = 0
-  var currentCol = 0
-  var i = 0
-
-  while i + 4 < data.len:
-    let deltaLine = data[i]
-    let deltaStart = data[i + 1]
-    let length = data[i + 2]
-    let tokenType = data[i + 3]
-    # data[i + 4] = tokenModifiers (unused for now)
-    i += 5
-
-    if deltaLine > 0:
-      currentLine += deltaLine
-      currentCol = deltaStart
-    else:
-      currentCol += deltaStart
-
-    if currentLine < lineCount:
-      semanticLines[currentLine].add(SemanticToken(
-        col: currentCol,
-        length: length,
-        tokenType: tokenType,
-      ))
-
 proc clearSemanticTokens*() =
   semanticLines = @[]
 
@@ -91,7 +62,23 @@ proc applyTokenDiff*(startLine: int, oldCount: int, newLines: seq[seq[SemanticTo
   if semanticLines.len == 0 and newLines.len == 0:
     return
   let removeEnd = min(startLine + oldCount, semanticLines.len)
-  semanticLines = semanticLines[0..<startLine] & newLines & semanticLines[removeEnd..^1]
+  let removeCount = removeEnd - startLine
+  if removeCount == newLines.len:
+    # Same size — overwrite in place (common case: undo/redo single line)
+    for i in 0..<newLines.len:
+      semanticLines[startLine + i] = newLines[i]
+  elif removeCount < newLines.len:
+    # More new lines than old — overwrite existing, insert extras
+    for i in 0..<removeCount:
+      semanticLines[startLine + i] = newLines[i]
+    for i in removeCount..<newLines.len:
+      semanticLines.insert(newLines[i], startLine + i)
+  else:
+    # Fewer new lines — overwrite what fits, delete extras
+    for i in 0..<newLines.len:
+      semanticLines[startLine + i] = newLines[i]
+    for i in countdown(removeEnd - 1, startLine + newLines.len):
+      semanticLines.delete(i)
 
 proc clearTokenLegend*() =
   tokenLegend = @[]

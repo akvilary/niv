@@ -201,12 +201,20 @@ proc emitStringTokens(tokens: var seq[PythonToken], text: string,
 
 proc tokenizePython(text: string, startLine: int = 0, endLine: int = int.high;
                     known: KnownSymbols = default(KnownSymbols)): (seq[PythonToken], seq[DiagInfo]) =
-  var tokens: seq[PythonToken]
+  var tokens = newSeqOfCap[PythonToken](text.len div 6)
   var diags: seq[DiagInfo]
   var pos = 0
   var line = 0
   var col = 0
-  var lastKeyword = ""  # Track "def"/"class" for next identifier
+
+  type Keyword = enum
+    kwNone = ""
+    kwDef = "def"
+    kwClass = "class"
+    kwImport = "import"
+    kwFrom = "from"
+  template `==`(s: string, k: Keyword): bool = s == $k
+  var lastKw: Keyword = kwNone
 
   # Scope tracking
   var scopeStack: seq[ScopeEntry] = @[ScopeEntry(kind: skModule, indent: -1)]
@@ -231,9 +239,6 @@ proc tokenizePython(text: string, startLine: int = 0, endLine: int = int.high;
   # Function call parenthesis depth (for keyword argument detection)
   var callDepth = 0
 
-  proc isIdentChar(c: char): bool =
-    c in {'a'..'z', 'A'..'Z', '0'..'9', '_'}
-
   proc isUpperConst(s: string): bool =
     for c in s:
       if c notin {'A'..'Z', '0'..'9', '_'}: return false
@@ -256,7 +261,7 @@ proc tokenizePython(text: string, startLine: int = 0, endLine: int = int.high;
         col = 0
         atLineStart = true
         lineIndent = 0
-        lastKeyword = ""
+        lastKw = kwNone
         if not inImportParens:
           inImportLine = false
           inFromLine = false
@@ -288,7 +293,7 @@ proc tokenizePython(text: string, startLine: int = 0, endLine: int = int.high;
     return false
 
   # Read a string (single or triple quoted)
-  proc readString(quoteChar: char, isRaw: bool): (int, int, int, bool) =
+  proc readString(quoteChar: char, isRaw: bool) =
     let sLine = line
     let sCol = col
     var length = 0
@@ -302,13 +307,12 @@ proc tokenizePython(text: string, startLine: int = 0, endLine: int = int.high;
           if pos < text.len: advance(); inc length
         elif text[pos] == quoteChar and pos + 2 < text.len and
              text[pos + 1] == quoteChar and text[pos + 2] == quoteChar:
-          for _ in 0..<3: advance(); inc length
-          return (sLine, sCol, length, true)
+          for _ in 0..<3: advance()
+          return
         else:
           advance(); inc length
       diags.add(DiagInfo(line: sLine, col: sCol, endCol: sCol + min(length, 3),
                          message: "Unterminated triple-quoted string"))
-      return (sLine, sCol, length, false)
     else:
       advance(); inc length  # skip opening quote
       while pos < text.len:
@@ -317,17 +321,16 @@ proc tokenizePython(text: string, startLine: int = 0, endLine: int = int.high;
           advance(); inc length
           if pos < text.len: advance(); inc length
         elif c == quoteChar:
-          advance(); inc length
-          return (sLine, sCol, length, true)
+          advance()
+          return
         elif c == '\n':
           diags.add(DiagInfo(line: sLine, col: sCol, endCol: sCol + length,
                              message: "Unterminated string"))
-          return (sLine, sCol, length, false)
+          return
         else:
           advance(); inc length
       diags.add(DiagInfo(line: sLine, col: sCol, endCol: sCol + length,
                          message: "Unterminated string"))
-      return (sLine, sCol, length, false)
 
   while pos < text.len:
     skipWhitespace()
@@ -340,10 +343,13 @@ proc tokenizePython(text: string, startLine: int = 0, endLine: int = int.high;
     of '#':
       let sLine = line
       let sCol = col
-      var length = 0
+      let commentStart = pos
       while pos < text.len and text[pos] != '\n':
-        advance(); inc length
-      tokens.add(PythonToken(kind: ptComment, line: sLine, col: sCol, length: length))
+        inc pos
+      let length = pos - commentStart
+      col += length
+      if sLine >= startLine:
+        tokens.add(PythonToken(kind: ptComment, line: sLine, col: sCol, length: length))
 
     # String prefixes or identifiers
     of 'a'..'z', 'A'..'Z', '_':
@@ -360,41 +366,42 @@ proc tokenizePython(text: string, startLine: int = 0, endLine: int = int.high;
         var prefixLen = 1
         var nextPos = pos + 1
         if nextPos < text.len and text[nextPos] in {'f', 'F', 'r', 'R', 'b', 'B'}:
-          let pair = ($c & $text[nextPos]).toLowerAscii()
-          if pair in ["rf", "fr", "rb", "br"]:
+          let c1 = if c in {'A'..'Z'}: chr(ord(c) + 32) else: c
+          let c2 = if text[nextPos] in {'A'..'Z'}: chr(ord(text[nextPos]) + 32) else: text[nextPos]
+          if (c1 == 'r' and c2 in {'f', 'b'}) or (c1 in {'f', 'b'} and c2 == 'r'):
             prefixLen = 2; inc nextPos
         if nextPos < text.len and text[nextPos] in {'\'', '"'}:
           isStringPrefix = true
           isRaw = c in {'r', 'R'} or (prefixLen == 2 and (text[pos + 1] in {'r', 'R'} or c in {'r', 'R'}))
           for _ in 0..<prefixLen: advance()
           let quoteChar = text[pos]
-          let (_, _, strLen, _) = readString(quoteChar, isRaw)
-          emitStringTokens(tokens, text, startPos, pos, sLine, sCol, line)
+          readString(quoteChar, isRaw)
+          emitStringTokens(tokens, text, startPos, pos, sLine, sCol, line, startLine, endLine)
 
       if not isStringPrefix:
         # Read identifier
-        while pos < text.len and isIdentChar(text[pos]):
-          advance()
+        while pos < text.len and text[pos] in {'a'..'z', 'A'..'Z', '0'..'9', '_'}:
+          inc pos
+        col += pos - startPos
         let word = text[startPos..<pos]
         let length = pos - startPos
-        lastIdent = word
 
-        # Classify the identifier
-        if word == "def" or word == "class":
+        # Classify the identifier (lastIdent updated after, so enum check sees previous ident)
+        if word == kwDef or word == kwClass:
           tokens.add(PythonToken(kind: ptKeyword, line: sLine, col: sCol, length: length))
-          lastKeyword = word
-        elif word == "import":
+          lastKw = if word == kwDef: kwDef else: kwClass
+        elif word == kwImport:
           tokens.add(PythonToken(kind: ptKeyword, line: sLine, col: sCol, length: length))
           if inFromLine:
             inFromLine = false
           else:
             inImportLine = true
-          lastKeyword = ""
-        elif word == "from":
+          lastKw = kwNone
+        elif word == kwFrom:
           tokens.add(PythonToken(kind: ptKeyword, line: sLine, col: sCol, length: length))
           inFromLine = true
-          lastKeyword = ""
-        elif lastKeyword == "def":
+          lastKw = kwNone
+        elif lastKw == kwDef:
           # Function/method name
           let isMethod = inClassScope()
           if isMethod:
@@ -403,7 +410,7 @@ proc tokenizePython(text: string, startLine: int = 0, endLine: int = int.high;
           else:
             tokens.add(PythonToken(kind: ptFunction, line: sLine, col: sCol, length: length))
             scopeStack.add(ScopeEntry(kind: skFunction, indent: lineIndent))
-          lastKeyword = ""
+          lastKw = kwNone
           # Prepare for parameter parsing
           inFuncParams = false  # will be set true when we see '('
           funcParamDepth = 0
@@ -411,10 +418,10 @@ proc tokenizePython(text: string, startLine: int = 0, endLine: int = int.high;
           afterParamColon = false
           expectParam = false
           expectDefParams = true
-        elif lastKeyword == "class":
+        elif lastKw == kwClass:
           tokens.add(PythonToken(kind: ptClass, line: sLine, col: sCol, length: length))
           scopeStack.add(ScopeEntry(kind: skClass, indent: lineIndent))
-          lastKeyword = ""
+          lastKw = kwNone
         elif inFuncParams and not afterParamColon:
           # Inside function parameter list
           if (word == "self") and isFirstParam:
@@ -477,82 +484,89 @@ proc tokenizePython(text: string, startLine: int = 0, endLine: int = int.high;
             tokens.add(PythonToken(kind: ptDunder, line: sLine, col: sCol, length: length))
           elif isUpperConst(word):
             tokens.add(PythonToken(kind: ptBuiltinConst, line: sLine, col: sCol, length: length))
-          lastKeyword = ""
+          lastKw = kwNone
+        lastIdent = word
 
     # Regular strings
     of '"', '\'':
-      lastKeyword = ""
+      lastKw = kwNone
       afterDot = false
       let quoteChar = c
       let sLine = line
       let sCol = col
       let stringStartPos = pos
-      let (_, _, length, _) = readString(quoteChar, false)
-      emitStringTokens(tokens, text, stringStartPos, pos, sLine, sCol, line)
+      readString(quoteChar, false)
+      emitStringTokens(tokens, text, stringStartPos, pos, sLine, sCol, line, startLine, endLine)
 
     # Numbers
     of '0'..'9':
-      lastKeyword = ""
+      lastKw = kwNone
       afterDot = false
       let sLine = line
       let sCol = col
-      var length = 0
+      let numStart = pos
       if c == '0' and pos + 1 < text.len and text[pos + 1] in {'x', 'X'}:
-        advance(); advance(); length = 2
+        pos += 2
         while pos < text.len and text[pos] in {'0'..'9', 'a'..'f', 'A'..'F', '_'}:
-          advance(); inc length
+          inc pos
       elif c == '0' and pos + 1 < text.len and text[pos + 1] in {'o', 'O'}:
-        advance(); advance(); length = 2
+        pos += 2
         while pos < text.len and text[pos] in {'0'..'7', '_'}:
-          advance(); inc length
+          inc pos
       elif c == '0' and pos + 1 < text.len and text[pos + 1] in {'b', 'B'}:
-        advance(); advance(); length = 2
+        pos += 2
         while pos < text.len and text[pos] in {'0', '1', '_'}:
-          advance(); inc length
+          inc pos
       else:
         while pos < text.len and text[pos] in {'0'..'9', '_'}:
-          advance(); inc length
+          inc pos
         if pos < text.len and text[pos] == '.':
-          advance(); inc length
+          inc pos
           while pos < text.len and text[pos] in {'0'..'9', '_'}:
-            advance(); inc length
+            inc pos
         if pos < text.len and text[pos] in {'e', 'E'}:
-          advance(); inc length
+          inc pos
           if pos < text.len and text[pos] in {'+', '-'}:
-            advance(); inc length
+            inc pos
           while pos < text.len and text[pos] in {'0'..'9', '_'}:
-            advance(); inc length
+            inc pos
       if pos < text.len and text[pos] in {'j', 'J'}:
-        advance(); inc length
-      tokens.add(PythonToken(kind: ptNumber, line: sLine, col: sCol, length: length))
+        inc pos
+      let length = pos - numStart
+      col += length
+      if sLine >= startLine:
+        tokens.add(PythonToken(kind: ptNumber, line: sLine, col: sCol, length: length))
 
     # Dot — could start a float like .5 or be property access
     of '.':
-      lastKeyword = ""
+      lastKw = kwNone
       if pos + 1 < text.len and text[pos + 1] in {'0'..'9'}:
         afterDot = false
         let sLine = line
         let sCol = col
-        var length = 0
-        advance(); inc length
+        let numStart = pos
+        inc pos  # skip .
         while pos < text.len and text[pos] in {'0'..'9', '_'}:
-          advance(); inc length
+          inc pos
         if pos < text.len and text[pos] in {'e', 'E'}:
-          advance(); inc length
+          inc pos
           if pos < text.len and text[pos] in {'+', '-'}:
-            advance(); inc length
+            inc pos
           while pos < text.len and text[pos] in {'0'..'9', '_'}:
-            advance(); inc length
+            inc pos
         if pos < text.len and text[pos] in {'j', 'J'}:
-          advance(); inc length
-        tokens.add(PythonToken(kind: ptNumber, line: sLine, col: sCol, length: length))
+          inc pos
+        let length = pos - numStart
+        col += length
+        if sLine >= startLine:
+          tokens.add(PythonToken(kind: ptNumber, line: sLine, col: sCol, length: length))
       else:
         afterDot = true
         advance()
 
     # Decorators
     of '@':
-      lastKeyword = ""
+      lastKw = kwNone
       afterDot = false
       let sLine = line
       let sCol = col
@@ -561,7 +575,7 @@ proc tokenizePython(text: string, startLine: int = 0, endLine: int = int.high;
 
     # Parentheses (track function definition params and call depth)
     of '(':
-      lastKeyword = ""
+      lastKw = kwNone
       afterDot = false
       if inImportLine:
         inImportParens = true
@@ -579,7 +593,7 @@ proc tokenizePython(text: string, startLine: int = 0, endLine: int = int.high;
       expectDefParams = false
       advance()
     of ')':
-      lastKeyword = ""
+      lastKw = kwNone
       afterDot = false
       if inImportParens:
         inImportParens = false
@@ -595,7 +609,7 @@ proc tokenizePython(text: string, startLine: int = 0, endLine: int = int.high;
 
     # Comma in func params
     of ',':
-      lastKeyword = ""
+      lastKw = kwNone
       afterDot = false
       if inFuncParams:
         afterParamColon = false
@@ -604,7 +618,7 @@ proc tokenizePython(text: string, startLine: int = 0, endLine: int = int.high;
 
     # Colon in func params (type annotation)
     of ':':
-      lastKeyword = ""
+      lastKw = kwNone
       afterDot = false
       if inFuncParams and funcParamDepth == 1:
         afterParamColon = true
@@ -612,7 +626,7 @@ proc tokenizePython(text: string, startLine: int = 0, endLine: int = int.high;
 
     # Star / double star for *args, **kwargs
     of '*':
-      lastKeyword = ""
+      lastKw = kwNone
       afterDot = false
       let sLine = line
       let sCol = col
@@ -632,7 +646,7 @@ proc tokenizePython(text: string, startLine: int = 0, endLine: int = int.high;
 
     # Operators
     of '=':
-      lastKeyword = ""; afterDot = false
+      lastKw = kwNone; afterDot = false
       let sLine = line; let sCol = col
       advance(); var length = 1
       if pos < text.len and text[pos] == '=':
@@ -643,35 +657,35 @@ proc tokenizePython(text: string, startLine: int = 0, endLine: int = int.high;
       else:
         tokens.add(PythonToken(kind: ptOperator, line: sLine, col: sCol, length: length))
     of '!':
-      lastKeyword = ""; afterDot = false
+      lastKw = kwNone; afterDot = false
       let sLine = line; let sCol = col
       advance(); var length = 1
       if pos < text.len and text[pos] == '=':
         advance(); inc length
       tokens.add(PythonToken(kind: ptOperator, line: sLine, col: sCol, length: length))
     of '<':
-      lastKeyword = ""; afterDot = false
+      lastKw = kwNone; afterDot = false
       let sLine = line; let sCol = col
       advance(); var length = 1
       if pos < text.len and text[pos] in {'=', '<'}:
         advance(); inc length
       tokens.add(PythonToken(kind: ptOperator, line: sLine, col: sCol, length: length))
     of '>':
-      lastKeyword = ""; afterDot = false
+      lastKw = kwNone; afterDot = false
       let sLine = line; let sCol = col
       advance(); var length = 1
       if pos < text.len and text[pos] in {'=', '>'}:
         advance(); inc length
       tokens.add(PythonToken(kind: ptOperator, line: sLine, col: sCol, length: length))
     of '+', '%', '&', '|', '^', '~':
-      lastKeyword = ""; afterDot = false
+      lastKw = kwNone; afterDot = false
       let sLine = line; let sCol = col
       advance(); var length = 1
       if pos < text.len and text[pos] == '=':
         advance(); inc length
       tokens.add(PythonToken(kind: ptOperator, line: sLine, col: sCol, length: length))
     of '-':
-      lastKeyword = ""; afterDot = false
+      lastKw = kwNone; afterDot = false
       let sLine = line; let sCol = col
       advance(); var length = 1
       if pos < text.len and text[pos] == '>':
@@ -680,7 +694,7 @@ proc tokenizePython(text: string, startLine: int = 0, endLine: int = int.high;
         advance(); inc length
       tokens.add(PythonToken(kind: ptOperator, line: sLine, col: sCol, length: length))
     of '/':
-      lastKeyword = ""; afterDot = false
+      lastKw = kwNone; afterDot = false
       let sLine = line; let sCol = col
       advance(); var length = 1
       if pos < text.len and text[pos] == '/':
@@ -693,10 +707,10 @@ proc tokenizePython(text: string, startLine: int = 0, endLine: int = int.high;
 
     # Brackets and other punctuation — skip
     of '[', ']', '{', '}', ';', '\\':
-      lastKeyword = ""; afterDot = false
+      lastKw = kwNone; afterDot = false
       advance()
     else:
-      lastKeyword = ""; afterDot = false
+      lastKw = kwNone; afterDot = false
       advance()
 
   if tokens.len > 0:
@@ -716,8 +730,8 @@ proc tokenizePython(text: string, startLine: int = 0, endLine: int = int.high;
 # Semantic Token Encoding (LSP delta encoding)
 # ---------------------------------------------------------------------------
 
-proc encodeSemanticTokens(tokens: seq[PythonToken]): seq[int] =
-  result = @[]
+proc encodeSemanticTokens(tokens: openArray[PythonToken]): seq[int] =
+  result = newSeqOfCap[int](tokens.len * 5)
   var prevLine = 0
   var prevCol = 0
   for tok in tokens:
@@ -811,8 +825,132 @@ proc sendNotification(meth: string, params: JsonNode) =
 # Diagnostics publishing
 # ---------------------------------------------------------------------------
 
+proc scanStringDiagnostics(text: string): seq[DiagInfo] =
+  ## Lightweight scanner that only detects unterminated strings.
+  ## Much cheaper than full tokenizePython — no scope tracking, no token emission.
+  var pos = 0
+  var line = 0
+  var col = 0
+
+  template adv() =
+    if pos < text.len:
+      if text[pos] == '\n': inc line; col = 0
+      else: inc col
+      inc pos
+
+  while pos < text.len:
+    let c = text[pos]
+    case c
+    of '#':
+      # Skip comment to end of line
+      while pos < text.len and text[pos] != '\n': inc pos
+    of 'f', 'F', 'r', 'R', 'b', 'B', 'u', 'U':
+      # Possible string prefix
+      var prefixLen = 0
+      var isRaw = c in {'r', 'R'}
+      if pos + 1 < text.len and text[pos + 1] in {'f', 'F', 'r', 'R', 'b', 'B'}:
+        let n = text[pos + 1]
+        let c1 = if c in {'A'..'Z'}: chr(ord(c) + 32) else: c
+        let c2 = if n in {'A'..'Z'}: chr(ord(n) + 32) else: n
+        if (c1 == 'r' and c2 in {'f', 'b'}) or (c1 in {'f', 'b'} and c2 == 'r'):
+          prefixLen = 2
+          isRaw = c in {'r', 'R'} or n in {'r', 'R'}
+          if pos + 2 < text.len and text[pos + 2] in {'\'', '"'}:
+            for _ in 0..<2: adv()
+          else:
+            adv(); adv(); continue
+        else:
+          if pos + 1 < text.len and text[pos + 1] in {'\'', '"'}:
+            prefixLen = 1
+            adv()
+          else:
+            adv(); continue
+      elif pos + 1 < text.len and text[pos + 1] in {'\'', '"'}:
+        prefixLen = 1
+        adv()
+      else:
+        adv(); continue
+      # Now at quote char
+      let quoteChar = text[pos]
+      let sLine = line
+      let sCol = col - prefixLen
+      let isTriple = pos + 2 < text.len and text[pos + 1] == quoteChar and text[pos + 2] == quoteChar
+      if isTriple:
+        for _ in 0..<3: adv()
+        var found = false
+        while pos < text.len:
+          if text[pos] == '\\' and not isRaw:
+            adv()
+            if pos < text.len: adv()
+          elif text[pos] == quoteChar and pos + 2 < text.len and
+               text[pos + 1] == quoteChar and text[pos + 2] == quoteChar:
+            for _ in 0..<3: adv()
+            found = true; break
+          else: adv()
+        if not found:
+          result.add(DiagInfo(line: sLine, col: sCol, endCol: sCol + 3,
+                              message: "Unterminated triple-quoted string"))
+      else:
+        adv()  # skip opening quote
+        var found = false
+        while pos < text.len:
+          let ch = text[pos]
+          if ch == '\\' and not isRaw:
+            adv()
+            if pos < text.len: adv()
+          elif ch == quoteChar:
+            adv(); found = true; break
+          elif ch == '\n':
+            result.add(DiagInfo(line: sLine, col: sCol, endCol: col,
+                                message: "Unterminated string"))
+            found = true; break
+          else: adv()
+        if not found:
+          result.add(DiagInfo(line: sLine, col: sCol, endCol: col,
+                              message: "Unterminated string"))
+    of '\'', '"':
+      let quoteChar = c
+      let sLine = line
+      let sCol = col
+      let isTriple = pos + 2 < text.len and text[pos + 1] == quoteChar and text[pos + 2] == quoteChar
+      if isTriple:
+        for _ in 0..<3: adv()
+        var found = false
+        while pos < text.len:
+          if text[pos] == '\\':
+            adv()
+            if pos < text.len: adv()
+          elif text[pos] == quoteChar and pos + 2 < text.len and
+               text[pos + 1] == quoteChar and text[pos + 2] == quoteChar:
+            for _ in 0..<3: adv()
+            found = true; break
+          else: adv()
+        if not found:
+          result.add(DiagInfo(line: sLine, col: sCol, endCol: sCol + 3,
+                              message: "Unterminated triple-quoted string"))
+      else:
+        adv()
+        var found = false
+        while pos < text.len:
+          let ch = text[pos]
+          if ch == '\\':
+            adv()
+            if pos < text.len: adv()
+          elif ch == quoteChar:
+            adv(); found = true; break
+          elif ch == '\n':
+            result.add(DiagInfo(line: sLine, col: sCol, endCol: col,
+                                message: "Unterminated string"))
+            found = true; break
+          else: adv()
+        if not found:
+          result.add(DiagInfo(line: sLine, col: sCol, endCol: col,
+                              message: "Unterminated string"))
+    else:
+      adv()
+
 proc publishDiagnostics(uri: string, text: string) =
-  let (_, diags) = tokenizePython(text)
+  let diags = scanStringDiagnostics(text)
   var diagsJson = newJArray()
   for d in diags:
     diagsJson.add(%*{
@@ -1142,6 +1280,21 @@ type SymbolKind = enum
   skClass, skEnum, skFunction, skUnknown
 
 var symbolCheckCache: Table[string, Table[string, SymbolKind]]
+var moduleFuncCache: Table[string, HashSet[string]]
+
+proc getModuleFuncNames(modulePath: string): HashSet[string] =
+  ## Get set of top-level function names in a module. Cached after first access.
+  if modulePath in moduleFuncCache:
+    return moduleFuncCache[modulePath]
+  let moduleLines = getModuleLines(modulePath)
+  for mln in moduleLines:
+    if mln.len > 4 and mln[0] == 'd' and mln[1] == 'e' and mln[2] == 'f' and mln[3] == ' ':
+      var nameEnd = 0
+      while 4 + nameEnd < mln.len and mln[4 + nameEnd] in {'a'..'z', 'A'..'Z', '0'..'9', '_'}:
+        inc nameEnd
+      if nameEnd > 0:
+        result.incl(mln[4..<4 + nameEnd])
+  moduleFuncCache[modulePath] = result
 
 proc findSymbolInModule(modulePath: string, name: string, depth: int = 0): SymbolKind =
   ## Check if `name` is a class or function defined or re-exported in the module.
@@ -1158,17 +1311,10 @@ proc findSymbolInModule(modulePath: string, name: string, depth: int = 0): Symbo
     let kind = if ci.bases.anyIt(it in enumBaseSet): skEnum else: skClass
     symbolCheckCache[modulePath][name] = kind
     return kind
-  # Function check — early exit, no seq allocation
-  let moduleLines = getModuleLines(modulePath)
-  for i in 0..<moduleLines.len:
-    let mln = moduleLines[i]
-    if mln.len > 4 and mln[0] == 'd' and mln[1] == 'e' and mln[2] == 'f' and mln[3] == ' ':
-      var nameEnd = 0
-      while nameEnd < mln.len - 4 and mln[4 + nameEnd] in {'a'..'z', 'A'..'Z', '0'..'9', '_'}:
-        inc nameEnd
-      if nameEnd > 0 and mln[4..<4 + nameEnd] == name:
-        symbolCheckCache[modulePath][name] = skFunction
-        return skFunction
+  # Function check — O(1) via cached function name set
+  if name in getModuleFuncNames(modulePath):
+    symbolCheckCache[modulePath][name] = skFunction
+    return skFunction
   # Check imports in this module for re-exports (use cache)
   for imp in getModuleImports(modulePath):
     if imp.name == name:
@@ -1310,6 +1456,10 @@ proc collectKnownSymbols*(textLines: seq[string], filePath: string = ""): KnownS
   for imp in result.imports:
     if imp.name.len == 0: continue
     let target = if imp.alias.len > 0: imp.alias else: imp.name
+    # Skip module lookup for names already classified by builtin sets
+    if imp.name in builtinTypeSet or imp.name in builtinFuncSet or imp.name in builtinConstSet:
+      if imp.name in builtinTypeSet: result.types.incl(target)
+      continue
     let modulePath = resolveModulePath(imp.module)
     if modulePath.len > 0:
       result.symbolModules[target] = modulePath
@@ -1889,6 +2039,7 @@ proc main() =
             moduleLinesCache.del(filePath)
             moduleClassCache.del(filePath)
             moduleImportCache.del(filePath)
+            moduleFuncCache.del(filePath)
             symbolCheckCache.del(filePath)
           if newText.len < 1_000_000:
             publishDiagnostics(uri, newText)
