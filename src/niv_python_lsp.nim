@@ -48,17 +48,31 @@ type
     endCol: int
     message: string
 
+  ImportInfo = object
+    module: string
+    name: string
+    alias: string
+
+  ClassInfo = object
+    name: string
+    bases: seq[string]
+    bodyStartLine: int
+    bodyIndent: int
+
   KnownSymbols = object
     types: HashSet[string]
     functions: HashSet[string]
     enums: HashSet[string]
+    localClasses: Table[string, ClassInfo]  # className → ClassInfo for current doc
     symbolModules: Table[string, string]  # symbolName → modulePath
+    imports: seq[ImportInfo]
 
   DocumentState = object
     uri: string
     text: string
     version: int
     known: KnownSymbols
+    lines: seq[string]
 
 # Semantic token type indices (must match legend in initialize response)
 const
@@ -835,18 +849,6 @@ proc initPythonPaths() =
   except OSError:
     discard
 
-type
-  ImportInfo = object
-    module: string
-    name: string
-    alias: string
-
-  ClassInfo = object
-    name: string
-    bases: seq[string]
-    bodyStartLine: int
-    bodyIndent: int
-
 proc collectImportNames(lines: openArray[string], startIdx: int, firstPart: string): (string, int) =
   ## Collect names from potentially multiline parenthesized import.
   ## Returns (names string with parens stripped, last consumed line index).
@@ -880,8 +882,7 @@ proc addParsedImports(result: var seq[ImportInfo], module: string, names: string
     let alias = if asParts.len > 1: asParts[1].strip() else: ""
     result.add(ImportInfo(module: module, name: name, alias: alias))
 
-proc parseImports(text: string, packageDir: string = ""): seq[ImportInfo] =
-  let lines = text.split('\n')
+proc parseImports(lines: seq[string], packageDir: string = ""): seq[ImportInfo] =
   var i = 0
 
   while i < lines.len:
@@ -951,11 +952,16 @@ proc parseImports(text: string, packageDir: string = ""): seq[ImportInfo] =
         result.add(ImportInfo(module: module, name: "", alias: alias))
     inc i
 
-proc parseClasses(text: string): seq[ClassInfo] =
+proc parseClasses(lines: seq[string]): seq[ClassInfo] =
   ## Extract class definitions with their base classes
-  let lines = text.split('\n')
   for i in 0..<lines.len:
-    let stripped = lines[i].strip()
+    let ln = lines[i]
+    var lineIndent = 0
+    for c in ln:
+      if c == ' ': inc lineIndent
+      elif c == '\t': lineIndent += 4
+      else: break
+    let stripped = ln.strip()
     if stripped.startsWith("class "):
       var rest = stripped[6..^1]
       # Extract class name
@@ -978,7 +984,6 @@ proc parseClasses(text: string): seq[ClassInfo] =
             if baseName.len > 0:
               bases.add(baseName)
       # Determine body indent
-      let lineIndent = lines[i].len - stripped.len
       var bodyIndent = lineIndent + 4  # default
       if i + 1 < lines.len:
         let nextLine = lines[i + 1]
@@ -994,7 +999,83 @@ proc parseClasses(text: string): seq[ClassInfo] =
         bodyStartLine: i + 1, bodyIndent: bodyIndent
       ))
 
+proc findClassInText(lines: seq[string], name: string): (bool, ClassInfo) =
+  ## Find a specific class by name in lines. Stops at first match.
+  for i in 0..<lines.len:
+    let ln = lines[i]
+    var lineIndent = 0
+    for c in ln:
+      if c == ' ': inc lineIndent
+      elif c == '\t': lineIndent += 4
+      else: break
+    let stripped = ln.strip()
+    if stripped.startsWith("class "):
+      var rest = stripped[6..^1]
+      var nameEnd = 0
+      while nameEnd < rest.len and rest[nameEnd] in {'a'..'z', 'A'..'Z', '0'..'9', '_'}:
+        inc nameEnd
+      if nameEnd == 0: continue
+      let className = rest[0..<nameEnd]
+      if className != name: continue
+      var bases: seq[string]
+      if nameEnd < rest.len and rest[nameEnd] == '(':
+        let closeIdx = rest.find(')', nameEnd)
+        if closeIdx > nameEnd + 1:
+          let basesStr = rest[nameEnd + 1..<closeIdx]
+          for base in basesStr.split(','):
+            let b = base.strip()
+            let bracketIdx = b.find('[')
+            let baseName = if bracketIdx >= 0: b[0..<bracketIdx].strip() else: b
+            if baseName.len > 0:
+              bases.add(baseName)
+      var bodyIndent = lineIndent + 4
+      if i + 1 < lines.len:
+        let nextLine = lines[i + 1]
+        var nextIndent = 0
+        for c in nextLine:
+          if c == ' ': inc nextIndent
+          elif c == '\t': nextIndent += 4
+          else: break
+        if nextIndent > lineIndent:
+          bodyIndent = nextIndent
+      return (true, ClassInfo(
+        name: className, bases: bases,
+        bodyStartLine: i + 1, bodyIndent: bodyIndent
+      ))
+  return (false, ClassInfo())
+
 var modulePathCache: Table[string, string]
+var moduleClassCache: Table[string, Table[string, ClassInfo]]
+var moduleLinesCache: Table[string, seq[string]]
+
+proc getModuleLines(modulePath: string): seq[string] =
+  ## Get lines of a module file, using cache. Reads and splits on first access.
+  if modulePath in moduleLinesCache:
+    return moduleLinesCache[modulePath]
+  var moduleText: string
+  try:
+    moduleText = readFile(modulePath)
+  except IOError:
+    return @[]
+  result = moduleText.split('\n')
+  moduleLinesCache[modulePath] = result
+
+proc getModuleClassInfo(modulePath: string, className: string): (bool, ClassInfo) =
+  ## Get ClassInfo from a module file, using cache. Parses all classes on first access.
+  if modulePath in moduleClassCache:
+    if className in moduleClassCache[modulePath]:
+      return (true, moduleClassCache[modulePath][className])
+    return (false, ClassInfo())
+  let moduleLines = getModuleLines(modulePath)
+  if moduleLines.len == 0 and not fileExists(modulePath):
+    return (false, ClassInfo())
+  var classTable: Table[string, ClassInfo]
+  for ci in parseClasses(moduleLines):
+    classTable[ci.name] = ci
+  moduleClassCache[modulePath] = classTable
+  if className in classTable:
+    return (true, classTable[className])
+  return (false, ClassInfo())
 
 proc resolveModulePath(moduleName: string): string =
   if modulePathCache.hasKey(moduleName):
@@ -1016,77 +1097,217 @@ proc resolveModulePath(moduleName: string): string =
   modulePathCache[moduleName] = ""
   return ""
 
+var moduleImportCache: Table[string, seq[ImportInfo]]
+
+proc getModuleImports(modulePath: string): seq[ImportInfo] =
+  ## Get imports from a module file, using cache. Parses on first access.
+  if modulePath in moduleImportCache:
+    return moduleImportCache[modulePath]
+  let moduleLines = getModuleLines(modulePath)
+  result = parseImports(moduleLines, parentDir(modulePath))
+  moduleImportCache[modulePath] = result
+
+proc findClassInfo(lines: seq[string], name: string,
+                    known: KnownSymbols = default(KnownSymbols),
+                    imports: seq[ImportInfo] = @[]): (bool, ClassInfo, string) =
+  ## Find class by name. Searches localClasses, then lines, then symbolModules, then imports.
+  ## Returns (found, classInfo, filePath). filePath="" means found in given lines.
+  if name in known.localClasses:
+    return (true, known.localClasses[name], "")
+  if name in known.symbolModules:
+    let modulePath = known.symbolModules[name]
+    if modulePath.len > 0:
+      let (mFound, mCi) = getModuleClassInfo(modulePath, name)
+      if mFound: return (true, mCi, modulePath)
+  for imp in imports:
+    let target = if imp.alias.len > 0: imp.alias else: imp.name
+    if target == name and imp.name.len > 0:
+      let modulePath = resolveModulePath(imp.module)
+      if modulePath.len > 0:
+        let (iFound, iCi) = getModuleClassInfo(modulePath, imp.name)
+        if iFound: return (true, iCi, modulePath)
+  let (found, ci) = findClassInText(lines, name)
+  if found: return (true, ci, "")
+  return (false, ClassInfo(), "")
+
 proc isPascalCase(s: string): bool =
   if s.len == 0 or s[0] notin {'A'..'Z'}: return false
   for i in 1..<s.len:
     if s[i] in {'a'..'z'}: return true
   return false
 
-proc parseFunctions(text: string): seq[string] =
-  ## Extract top-level function names (def at zero indentation)
-  let lines = text.split('\n')
-  for i in 0..<lines.len:
-    let stripped = lines[i].strip()
-    if stripped.startsWith("def "):
-      let indent = lines[i].len - stripped.len
-      if indent == 0:
-        var rest = stripped[4..^1]
-        var nameEnd = 0
-        while nameEnd < rest.len and rest[nameEnd] in {'a'..'z', 'A'..'Z', '0'..'9', '_'}:
-          inc nameEnd
-        if nameEnd > 0:
-          result.add(rest[0..<nameEnd])
-
 const enumBaseSet = ["Enum", "IntEnum", "StrEnum", "Flag", "IntFlag"].toHashSet()
 
 type SymbolKind = enum
   skClass, skEnum, skFunction, skUnknown
 
-var symbolCheckCache: Table[string, SymbolKind]
+var symbolCheckCache: Table[string, Table[string, SymbolKind]]
 
 proc findSymbolInModule(modulePath: string, name: string, depth: int = 0): SymbolKind =
   ## Check if `name` is a class or function defined or re-exported in the module.
   ## Follows import chains up to depth 5.
   if depth > 5: return skUnknown
-  let key = modulePath & ":" & name
-  if symbolCheckCache.hasKey(key):
-    return symbolCheckCache[key]
-  symbolCheckCache[key] = skUnknown  # prevent cycles
-  var moduleText: string
-  try:
-    moduleText = readFile(modulePath)
-  except IOError:
-    return skUnknown
-  for c in parseClasses(moduleText):
-    if c.name == name:
-      let kind = if c.bases.anyIt(it in enumBaseSet): skEnum else: skClass
-      symbolCheckCache[key] = kind
-      return kind
-  for f in parseFunctions(moduleText):
-    if f == name:
-      symbolCheckCache[key] = skFunction
-      return skFunction
-  # Check imports in this module for re-exports
-  let pkgDir = parentDir(modulePath)
-  for imp in parseImports(moduleText, pkgDir):
+  if modulePath in symbolCheckCache and name in symbolCheckCache[modulePath]:
+    return symbolCheckCache[modulePath][name]
+  if modulePath notin symbolCheckCache:
+    symbolCheckCache[modulePath] = initTable[string, SymbolKind]()
+  symbolCheckCache[modulePath][name] = skUnknown  # prevent cycles
+  # Use moduleClassCache for class lookup
+  let (hasClass, ci) = getModuleClassInfo(modulePath, name)
+  if hasClass:
+    let kind = if ci.bases.anyIt(it in enumBaseSet): skEnum else: skClass
+    symbolCheckCache[modulePath][name] = kind
+    return kind
+  # Function check — early exit, no seq allocation
+  let moduleLines = getModuleLines(modulePath)
+  for i in 0..<moduleLines.len:
+    let mln = moduleLines[i]
+    if mln.len > 4 and mln[0] == 'd' and mln[1] == 'e' and mln[2] == 'f' and mln[3] == ' ':
+      var nameEnd = 0
+      while nameEnd < mln.len - 4 and mln[4 + nameEnd] in {'a'..'z', 'A'..'Z', '0'..'9', '_'}:
+        inc nameEnd
+      if nameEnd > 0 and mln[4..<4 + nameEnd] == name:
+        symbolCheckCache[modulePath][name] = skFunction
+        return skFunction
+  # Check imports in this module for re-exports (use cache)
+  for imp in getModuleImports(modulePath):
     if imp.name == name:
       let impPath = resolveModulePath(imp.module)
       if impPath.len > 0:
         let kind = findSymbolInModule(impPath, name, depth + 1)
         if kind != skUnknown:
-          symbolCheckCache[key] = kind
+          symbolCheckCache[modulePath][name] = kind
           return kind
   return skUnknown
 
-proc collectKnownSymbols*(text: string, filePath: string = ""): KnownSymbols =
-  for c in parseClasses(text):
-    if c.bases.anyIt(it in enumBaseSet):
-      result.enums.incl(c.name)
-    result.types.incl(c.name)
-  for f in parseFunctions(text):
-    result.functions.incl(f)
+proc collectKnownSymbols*(textLines: seq[string], filePath: string = ""): KnownSymbols =
+  ## Single pass over lines to collect classes, top-level functions, and imports.
   let packageDir = if filePath.len > 0: parentDir(filePath) else: ""
-  for imp in parseImports(text, packageDir):
+  var i = 0
+  while i < textLines.len:
+    let tln = textLines[i]
+    var leadingWs = 0
+    for c in tln:
+      if c in {' ', '\t'}: inc leadingWs
+      else: break
+    if leadingWs >= tln.len:
+      inc i
+      continue
+    let firstChar = tln[leadingWs]
+    if firstChar notin {'c', 'd', 'f', 'i'}:
+      inc i
+      continue
+    let stripped = tln[leadingWs..^1].strip(leading = false)
+    if stripped.startsWith("class "):
+      var rest = stripped[6..^1]
+      var nameEnd = 0
+      while nameEnd < rest.len and rest[nameEnd] in {'a'..'z', 'A'..'Z', '0'..'9', '_'}:
+        inc nameEnd
+      if nameEnd > 0:
+        let className = rest[0..<nameEnd]
+        result.types.incl(className)
+        var bases: seq[string]
+        if nameEnd < rest.len and rest[nameEnd] == '(':
+          let closeIdx = rest.find(')', nameEnd)
+          if closeIdx > nameEnd + 1:
+            let basesStr = rest[nameEnd + 1..<closeIdx]
+            for base in basesStr.split(','):
+              let b = base.strip()
+              let bracketIdx = b.find('[')
+              let baseName = if bracketIdx >= 0: b[0..<bracketIdx].strip() else: b
+              if baseName.len > 0:
+                bases.add(baseName)
+              if baseName in enumBaseSet:
+                result.enums.incl(className)
+        var lineIndent = 0
+        for c in textLines[i]:
+          if c == ' ': inc lineIndent
+          elif c == '\t': lineIndent += 4
+          else: break
+        var bodyIndent = lineIndent + 4
+        if i + 1 < textLines.len:
+          let nextLine = textLines[i + 1]
+          var nextIndent = 0
+          for c in nextLine:
+            if c == ' ': inc nextIndent
+            elif c == '\t': nextIndent += 4
+            else: break
+          if nextIndent > lineIndent:
+            bodyIndent = nextIndent
+        result.localClasses[className] = ClassInfo(
+          name: className, bases: bases,
+          bodyStartLine: i + 1, bodyIndent: bodyIndent
+        )
+    elif stripped.startsWith("def ") and textLines[i][0] == 'd':
+      var rest = stripped[4..^1]
+      var nameEnd = 0
+      while nameEnd < rest.len and rest[nameEnd] in {'a'..'z', 'A'..'Z', '0'..'9', '_'}:
+        inc nameEnd
+      if nameEnd > 0:
+        result.functions.incl(rest[0..<nameEnd])
+    elif stripped.startsWith("from "):
+      let rest = stripped[5..^1].strip()
+      let importIdx = rest.find(" import ")
+      if importIdx < 0:
+        inc i
+        continue
+      var module = rest[0..<importIdx].strip()
+      if module.startsWith(".") and packageDir.len > 0:
+        var dots = 0
+        while dots < module.len and module[dots] == '.': inc dots
+        var baseDir = packageDir
+        for _ in 1..<dots: baseDir = parentDir(baseDir)
+        let relName = module[dots..^1].strip()
+        if relName.len > 0:
+          let relPath = relName.replace(".", "/")
+          let asFile = baseDir / relPath & ".py"
+          if fileExists(asFile): module = asFile
+          else:
+            let asPackage = baseDir / relPath / "__init__.py"
+            if fileExists(asPackage): module = asPackage
+            else:
+              inc i
+              continue
+        else:
+          let namesRaw = rest[importIdx + 8..^1].strip()
+          let (names, endIdx) = collectImportNames(textLines, i, namesRaw)
+          i = endIdx
+          for part in names.split(','):
+            let trimmed = part.strip()
+            if trimmed.len == 0: continue
+            let asParts = trimmed.split(" as ")
+            let name = asParts[0].strip()
+            let alias = if asParts.len > 1: asParts[1].strip() else: ""
+            let subFile = baseDir / name & ".py"
+            let subPkg = baseDir / name / "__init__.py"
+            if fileExists(subFile):
+              result.imports.add(ImportInfo(module: subFile, name: name, alias: alias))
+            elif fileExists(subPkg):
+              result.imports.add(ImportInfo(module: subPkg, name: name, alias: alias))
+            else:
+              let initFile = baseDir / "__init__.py"
+              if fileExists(initFile):
+                result.imports.add(ImportInfo(module: initFile, name: name, alias: alias))
+          inc i
+          continue
+      elif module.startsWith("."):
+        inc i
+        continue
+      let namesRaw = rest[importIdx + 8..^1].strip()
+      let (names, endIdx) = collectImportNames(textLines, i, namesRaw)
+      i = endIdx
+      addParsedImports(result.imports, module, names)
+    elif stripped.startsWith("import "):
+      let rest = stripped[7..^1].strip()
+      for part in rest.split(','):
+        let trimmed = part.strip()
+        if trimmed.len == 0: continue
+        let asParts = trimmed.split(" as ")
+        let module = asParts[0].strip()
+        let alias = if asParts.len > 1: asParts[1].strip() else: ""
+        result.imports.add(ImportInfo(module: module, name: "", alias: alias))
+    inc i
+  for imp in result.imports:
     if imp.name.len == 0: continue
     let target = if imp.alias.len > 0: imp.alias else: imp.name
     let modulePath = resolveModulePath(imp.module)
@@ -1105,48 +1326,63 @@ proc collectKnownSymbols*(text: string, filePath: string = ""): KnownSymbols =
     elif isPascalCase(imp.name):
       result.types.incl(target)
 
-proc findDefinitionInText(text: string, word: string): (int, int) =
-  ## Find `def word` or `class word` in text. Returns (line, col) or (-1, -1).
-  let lines = text.split('\n')
+proc findDefinitionInText(lines: seq[string], word: string): (int, int) =
+  ## Find `def word` or `class word` in lines. Returns (line, col) or (-1, -1).
+  ## Single pass: def/class has priority over assignment.
   let defPattern = "def " & word
   let classPattern = "class " & word
+  var assignLine = -1
+  var assignCol = -1
   for i in 0..<lines.len:
-    let stripped = lines[i].strip()
+    let ln = lines[i]
+    var leadingWs = 0
+    for c in ln:
+      if c in {' ', '\t'}: inc leadingWs
+      else: break
+    let stripped = ln[leadingWs..^1].strip(leading = false)
     for pattern in [defPattern, classPattern]:
       if stripped.startsWith(pattern):
         let afterLen = pattern.len
         if afterLen >= stripped.len or
            stripped[afterLen] in {'(', ':', ' ', '\t'}:
-          let col = lines[i].find(pattern)
-          if col >= 0:
-            let nameCol = col + pattern.len - word.len
-            return (i, nameCol)
-  # Also look for top-level assignment: word = ...
-  for i in 0..<lines.len:
-    let stripped = lines[i].strip()
-    if stripped.startsWith(word) and stripped.len > word.len:
+          let nameCol = leadingWs + pattern.len - word.len
+          return (i, nameCol)
+    if assignLine < 0 and stripped.startsWith(word) and stripped.len > word.len:
       let after = stripped[word.len..^1].strip()
       if after.startsWith("=") and not after.startsWith("=="):
-        let col = lines[i].find(word)
-        if col >= 0:
-          return (i, col)
+        assignLine = i
+        assignCol = leadingWs
+  if assignLine >= 0:
+    return (assignLine, assignCol)
   return (-1, -1)
 
-proc findMemberInClassBody(text: string, classInfo: ClassInfo, memberName: string): (int, int) =
+proc findDefinitionViaKnown(name: string, known: KnownSymbols): (string, int, int) =
+  ## Find definition of name using cached module path from KnownSymbols.
+  if name notin known.symbolModules: return ("", -1, -1)
+  let modulePath = known.symbolModules[name]
+  let moduleLines = getModuleLines(modulePath)
+  let (ml, mc) = findDefinitionInText(moduleLines, name)
+  if ml >= 0:
+    return (modulePath, ml, mc)
+  return ("", -1, -1)
+
+proc findMemberInClassBody(lines: seq[string], classInfo: ClassInfo, memberName: string): (int, int) =
   ## Search for method (def name) or attribute (self.name/cls.name/class-level) in class body
-  let lines = text.split('\n')
   let defPattern = "def " & memberName
   let selfPattern = "self." & memberName
   let clsPattern = "cls." & memberName
+  const selfDotPos = 4  # "self." → dot at index 4
+  const clsDotPos = 3   # "cls." → dot at index 3
 
   for i in classInfo.bodyStartLine..<lines.len:
     let ln = lines[i]
     var indent = 0
+    var leadingWs = 0
     for c in ln:
-      if c == ' ': inc indent
-      elif c == '\t': indent += 4
+      if c == ' ': inc indent; inc leadingWs
+      elif c == '\t': indent += 4; inc leadingWs
       else: break
-    let stripped = ln.strip()
+    let stripped = ln[leadingWs..^1].strip(leading = false)
     if stripped.len > 0 and indent < classInfo.bodyIndent:
       break
 
@@ -1154,12 +1390,10 @@ proc findMemberInClassBody(text: string, classInfo: ClassInfo, memberName: strin
     if stripped.startsWith(defPattern):
       let afterLen = defPattern.len
       if afterLen >= stripped.len or stripped[afterLen] in {'(', ':', ' ', '\t'}:
-        let col = ln.find(defPattern)
-        if col >= 0:
-          return (i, col + 4)  # +4 to skip "def "
+        return (i, leadingWs + 4)  # +4 to skip "def "
 
     # Attribute assignment: self.memberName = / self.memberName: / cls.memberName = / cls.memberName:
-    for pattern in [selfPattern, clsPattern]:
+    for (pattern, dotPos) in [(selfPattern, selfDotPos), (clsPattern, clsDotPos)]:
       let idx = stripped.find(pattern)
       if idx >= 0:
         let afterLen = idx + pattern.len
@@ -1171,10 +1405,7 @@ proc findMemberInClassBody(text: string, classInfo: ClassInfo, memberName: strin
             if rest[0] == '=' and rest.len > 1 and rest[1] == '=':
               discard  # == is comparison, skip
             else:
-              let colInLine = ln.find(pattern)
-              if colInLine >= 0:
-                let dotPos = pattern.find('.')
-                return (i, colInLine + dotPos + 1)
+              return (i, leadingWs + idx + dotPos + 1)
 
     # Class-level attribute: memberName = ... or memberName: type
     if indent == classInfo.bodyIndent and stripped.startsWith(memberName):
@@ -1190,49 +1421,40 @@ proc findMemberInClassBody(text: string, classInfo: ClassInfo, memberName: strin
 
   return (-1, -1)
 
-proc findMemberWithMRO(text: string, className: string, methodName: string,
+proc findMemberWithMRO(lines: seq[string], className: string, methodName: string,
                         imports: seq[ImportInfo], visited: var HashSet[string],
+                        known: KnownSymbols = default(KnownSymbols),
                         depth: int = 0): (string, int, int) =
   ## Search for method in class and its bases (MRO). Returns (filePath, line, col).
   ## filePath="" means current file.
-  if depth > 10: return ("", -1, -1)  # prevent infinite recursion
+  if depth > 10: return ("", -1, -1)
   let key = className & "." & methodName
   if key in visited: return ("", -1, -1)
   visited.incl(key)
 
-  let classes = parseClasses(text)
+  let (classFound, cls, classPath) = findClassInfo(lines, className, known, imports)
+  if not classFound: return ("", -1, -1)
 
-  # Find the class
-  for cls in classes:
-    if cls.name == className:
-      # Search in this class body
-      let (foundLine, foundCol) = findMemberInClassBody(text, cls, methodName)
-      if foundLine >= 0:
-        return ("", foundLine, foundCol)
-      # Not found → search in base classes
-      for base in cls.bases:
-        # Check if base is defined in current file
-        var baseFound = false
-        for baseCls in classes:
-          if baseCls.name == base:
-            let (fp, bl, bc) = findMemberWithMRO(text, base, methodName, imports, visited, depth + 1)
-            if bl >= 0: return (fp, bl, bc)
-            baseFound = true
-            break
-        if not baseFound:
-          # Try to resolve base from imports
-          for imp in imports:
-            let target = if imp.alias.len > 0: imp.alias else: imp.name
-            if target == base and imp.name.len > 0:
-              let modulePath = resolveModulePath(imp.module)
-              if modulePath.len > 0:
-                let moduleText = readFile(modulePath)
-                let (fp, bl, bc) = findMemberWithMRO(moduleText, imp.name, methodName, imports, visited, depth + 1)
-                if bl >= 0:
-                  let resultPath = if fp.len > 0: fp else: modulePath
-                  return (resultPath, bl, bc)
-      return ("", -1, -1)
+  let workLines = if classPath.len > 0: getModuleLines(classPath) else: lines
 
+  let (foundLine, foundCol) = findMemberInClassBody(workLines, cls, methodName)
+  if foundLine >= 0:
+    return (classPath, foundLine, foundCol)
+
+  # Not found → search in base classes
+  let workImports = if classPath.len > 0: getModuleImports(classPath) else: imports
+  for base in cls.bases:
+    let (baseFound, baseCi, basePath) = findClassInfo(workLines, base, known, workImports)
+    if not baseFound: continue
+    let bLines = if basePath.len > 0: getModuleLines(basePath) else: workLines
+    let bImports = if basePath.len > 0: getModuleImports(basePath) else: workImports
+    let (fp, bl, bc) = findMemberWithMRO(bLines, baseCi.name, methodName, bImports, visited, known, depth + 1)
+    if bl >= 0:
+      let resultPath = if fp.len > 0: fp
+                        elif basePath.len > 0: basePath
+                        elif classPath.len > 0: classPath
+                        else: ""
+      return (resultPath, bl, bc)
   return ("", -1, -1)
 
 proc findMemberTransitive(className: string, memberName: string,
@@ -1243,80 +1465,79 @@ proc findMemberTransitive(className: string, memberName: string,
     let modulePath = resolveModulePath(imp.module)
     if modulePath.len == 0 or modulePath in visitedPaths: continue
     visitedPaths.incl(modulePath)
-    let moduleText = readFile(modulePath)
-    let moduleImports = parseImports(moduleText, parentDir(modulePath))
-    # Check if class is defined directly in this module
-    var visited: HashSet[string]
-    let (fp, ml, mc) = findMemberWithMRO(
-      moduleText, className, memberName, moduleImports, visited)
-    if ml >= 0:
-      let resultPath = if fp.len > 0: fp else: modulePath
-      return (resultPath, ml, mc)
-    # Check sub-imports of this module
-    for mImp in moduleImports:
-      let mTarget = if mImp.alias.len > 0: mImp.alias else: mImp.name
-      if mTarget == className and mImp.name.len > 0:
-        let mPath = resolveModulePath(mImp.module)
-        if mPath.len > 0 and mPath notin visitedPaths:
-          let mText = readFile(mPath)
-          var visited2: HashSet[string]
-          let (fp2, ml2, mc2) = findMemberWithMRO(
-            mText, mImp.name, memberName,
-            parseImports(mText, parentDir(mPath)), visited2)
-          if ml2 >= 0:
-            let resultPath = if fp2.len > 0: fp2 else: mPath
-            return (resultPath, ml2, mc2)
+    # Quick check: does this module define the target class?
+    let (hasClass, _) = getModuleClassInfo(modulePath, className)
+    let moduleImports = getModuleImports(modulePath)
+    if hasClass:
+      # Class found — do full MRO search (needs file lines)
+      let moduleLines = getModuleLines(modulePath)
+      var visited: HashSet[string]
+      let (fp, ml, mc) = findMemberWithMRO(
+        moduleLines, className, memberName, moduleImports, visited)
+      if ml >= 0:
+        let resultPath = if fp.len > 0: fp else: modulePath
+        return (resultPath, ml, mc)
     # Recurse into this module's imports
     let (rfp, rml, rmc) = findMemberTransitive(
       className, memberName, moduleImports, visitedPaths)
     if rml >= 0: return (rfp, rml, rmc)
   return ("", -1, -1)
 
-proc findEnclosingClass(text: string, useLine: int): string =
+proc findEnclosingClass(lines: seq[string], useLine: int): string =
   ## Find the class that encloses the given line by comparing indentation.
-  let lines = text.split('\n')
+  ## Single backward scan: find def indent, then continue to find class.
   var defIndent = -1
   for i in countdown(min(useLine, lines.len - 1), 0):
-    let stripped = lines[i].strip()
-    if stripped.startsWith("def "):
-      defIndent = lines[i].len - stripped.len
-      break
-  if defIndent < 0:
-    return ""
-  for i in countdown(min(useLine, lines.len - 1), 0):
-    let stripped = lines[i].strip()
-    if stripped.startsWith("class "):
-      let classIndent = lines[i].len - stripped.len
-      if classIndent < defIndent:
-        let afterClass = stripped[6..^1]
-        var name = ""
-        for c in afterClass:
-          if c in {'a'..'z', 'A'..'Z', '0'..'9', '_'}:
-            name.add(c)
-          else: break
-        return name
+    let ln = lines[i]
+    var indent = 0
+    var leadingWs = 0
+    for c in ln:
+      if c == ' ': inc indent; inc leadingWs
+      elif c == '\t': indent += 4; inc leadingWs
+      else: break
+    if leadingWs >= ln.len: continue
+    let stripped = ln[leadingWs..^1].strip(leading = false)
+    if defIndent < 0:
+      if stripped.startsWith("def "):
+        defIndent = indent
+    else:
+      if stripped.startsWith("class "):
+        if indent < defIndent:
+          let afterClass = stripped[6..^1]
+          var name = ""
+          for c in afterClass:
+            if c in {'a'..'z', 'A'..'Z', '0'..'9', '_'}:
+              name.add(c)
+            else: break
+          return name
   return ""
 
-proc resolveQualifierType(text: string, qualifier: string, useLine: int): string =
+proc resolveQualifierType(lines: seq[string], qualifier: string, useLine: int): string =
   ## Try to determine the type of a variable.
   ## Returns class name or "".
   # 1. self/cls → find enclosing class
   if qualifier == "self" or qualifier == "cls":
-    return findEnclosingClass(text, useLine)
+    return findEnclosingClass(lines, useLine)
 
   # 2. If qualifier starts with uppercase → likely a class itself
   if qualifier.len > 0 and qualifier[0] in {'A'..'Z'}:
     return qualifier
 
-  # 3. Search for assignment: qualifier = ClassName( above current line
-  let lines = text.split('\n')
+  # 3. Single backward scan: assignment + parameter type hint
+  let qFirstChar = qualifier[0]
   for i in countdown(min(useLine, lines.len - 1), 0):
-    let stripped = lines[i].strip()
-    if stripped.startsWith(qualifier) and stripped.len > qualifier.len:
+    let ln = lines[i]
+    var leadingWs = 0
+    for c in ln:
+      if c in {' ', '\t'}: inc leadingWs
+      else: break
+    let stripped = ln[leadingWs..^1].strip(leading = false)
+    if stripped.len == 0: continue
+    # Check assignment: qualifier = ClassName(
+    if stripped[0] == qFirstChar and stripped.startsWith(qualifier) and stripped.len > qualifier.len:
       let afterVar = stripped[qualifier.len..^1].strip()
       if afterVar.startsWith("=") and not afterVar.startsWith("=="):
         let rhs = afterVar[1..^1].strip()
-        # Extract class name from ClassName(...) or ClassName[...](...) etc.
         var className = ""
         for c in rhs:
           if c in {'a'..'z', 'A'..'Z', '0'..'9', '_'}:
@@ -1324,40 +1545,35 @@ proc resolveQualifierType(text: string, qualifier: string, useLine: int): string
           else: break
         if className.len > 0 and className[0] in {'A'..'Z'}:
           return className
-
-  # 4. Search for type hint in function parameters: (qualifier: ClassName, ...)
-  for i in countdown(min(useLine, lines.len - 1), 0):
-    let ln = lines[i].strip()
-    if ln.startsWith("def "):
-      # Parse parameters
-      let openParen = ln.find('(')
-      let closeParen = ln.rfind(')')
+    # Check function parameter type hint
+    if stripped.startsWith("def "):
+      let openParen = stripped.find('(')
+      let closeParen = stripped.rfind(')')
       if openParen >= 0 and closeParen > openParen:
-        let params = ln[openParen + 1..<closeParen]
+        let params = stripped[openParen + 1..<closeParen]
         for param in params.split(','):
           let p = param.strip()
           let colonIdx = p.find(':')
           if colonIdx >= 0:
             let paramName = p[0..<colonIdx].strip()
             let typeName = p[colonIdx + 1..^1].strip()
-            # Remove default value
             let eqIdx = typeName.find('=')
             let cleanType = if eqIdx >= 0: typeName[0..<eqIdx].strip() else: typeName
             if paramName == qualifier and cleanType.len > 0:
-              # Remove Optional[], List[] etc wrappers
               var baseType = cleanType
               let bracketIdx = baseType.find('[')
               if bracketIdx >= 0:
                 baseType = baseType[0..<bracketIdx]
               if baseType == "Optional" or baseType == "List" or baseType == "Dict":
-                discard  # can't resolve inner type easily
+                discard
               else:
                 return baseType
       break  # only check the immediately enclosing function
   return ""
 
-proc resolveAttributeType(text: string, className: string, attrName: string,
+proc resolveAttributeType(lines: seq[string], className: string, attrName: string,
                           imports: seq[ImportInfo], visited: var HashSet[string],
+                          known: KnownSymbols = default(KnownSymbols),
                           depth: int = 0): string =
   ## Determine the type of className.attrName by scanning the class body.
   ## Returns the type name or "".
@@ -1369,80 +1585,35 @@ proc resolveAttributeType(text: string, className: string, attrName: string,
   const identChars = {'a'..'z', 'A'..'Z', '0'..'9', '_'}
   const wrapperTypes = ["Optional", "List", "Dict", "Set", "Tuple", "Union",
                         "Sequence", "Iterable"]
-  let lines = text.split('\n')
-  let classes = parseClasses(text)
 
-  for cls in classes:
-    if cls.name != className: continue
+  let (classFound, cls, classPath) = findClassInfo(lines, className, known, imports)
+  if not classFound: return ""
 
-    let selfPattern = "self." & attrName
-    let clsPattern = "cls." & attrName
+  let workLines = if classPath.len > 0: getModuleLines(classPath) else: lines
+  let selfPattern = "self." & attrName
+  let clsPattern = "cls." & attrName
 
-    for i in cls.bodyStartLine..<lines.len:
-      let ln = lines[i]
-      var indent = 0
-      for c in ln:
-        if c == ' ': inc indent
-        elif c == '\t': indent += 4
-        else: break
-      let stripped = ln.strip()
-      if stripped.len > 0 and indent < cls.bodyIndent:
-        break
+  for i in cls.bodyStartLine..<workLines.len:
+    let ln = workLines[i]
+    var indent = 0
+    var leadingWs = 0
+    for c in ln:
+      if c == ' ': inc indent; inc leadingWs
+      elif c == '\t': indent += 4; inc leadingWs
+      else: break
+    let stripped = ln[leadingWs..^1].strip(leading = false)
+    if stripped.len > 0 and indent < cls.bodyIndent:
+      break
 
-      # self.attr / cls.attr
-      for pattern in [selfPattern, clsPattern]:
-        let idx = stripped.find(pattern)
-        if idx >= 0:
-          let afterLen = idx + pattern.len
-          if afterLen < stripped.len and stripped[afterLen] notin identChars:
-            let rest = stripped[afterLen..^1].strip()
-            if rest.len > 0 and rest[0] == ':':
-              # Type annotation: self.attr: Type
-              let typeStr = rest[1..^1].strip()
-              let eqIdx = typeStr.find('=')
-              let cleanType = if eqIdx >= 0: typeStr[0..<eqIdx].strip() else: typeStr
-              var typeName = ""
-              for c in cleanType:
-                if c in identChars: typeName.add(c)
-                else: break
-              if typeName.len > 0 and typeName notin wrapperTypes:
-                return typeName
-            elif rest.len > 0 and rest[0] == '=' and not (rest.len > 1 and rest[1] == '='):
-              # Assignment: self.attr = Type(...)
-              let rhs = rest[1..^1].strip()
-              var typeName = ""
-              for c in rhs:
-                if c in identChars: typeName.add(c)
-                else: break
-              if typeName.len > 0 and typeName[0] in {'A'..'Z'} and typeName notin wrapperTypes:
-                return typeName
-
-      # @property method: @property followed by def attrName(...) -> Type:
-      if stripped == "@property" and i + 1 < lines.len:
-        let nextStripped = lines[i + 1].strip()
-        let defPattern = "def " & attrName
-        if nextStripped.startsWith(defPattern) and
-           nextStripped.len > defPattern.len and
-           nextStripped[defPattern.len] in {'(', ' ', '\t'}:
-          let arrowIdx = nextStripped.find("->")
-          if arrowIdx >= 0:
-            let retPart = nextStripped[arrowIdx + 2..^1].strip()
-            # Strip trailing ':'
-            let colonIdx = retPart.find(':')
-            let cleanRet = if colonIdx >= 0: retPart[0..<colonIdx].strip() else: retPart
-            var typeName = ""
-            for c in cleanRet:
-              if c in identChars: typeName.add(c)
-              else: break
-            if typeName.len > 0 and typeName notin wrapperTypes:
-              return typeName
-
-      # Class-level attribute: attrName: Type or attrName = Type(...)
-      if indent == cls.bodyIndent and stripped.startsWith(attrName):
-        let afterLen = attrName.len
+    # self.attr / cls.attr
+    for pattern in [selfPattern, clsPattern]:
+      let idx = stripped.find(pattern)
+      if idx >= 0:
+        let afterLen = idx + pattern.len
         if afterLen < stripped.len and stripped[afterLen] notin identChars:
           let rest = stripped[afterLen..^1].strip()
           if rest.len > 0 and rest[0] == ':':
+            # Type annotation: self.attr: Type
             let typeStr = rest[1..^1].strip()
             let eqIdx = typeStr.find('=')
             let cleanType = if eqIdx >= 0: typeStr[0..<eqIdx].strip() else: typeStr
@@ -1453,6 +1624,7 @@ proc resolveAttributeType(text: string, className: string, attrName: string,
             if typeName.len > 0 and typeName notin wrapperTypes:
               return typeName
           elif rest.len > 0 and rest[0] == '=' and not (rest.len > 1 and rest[1] == '='):
+            # Assignment: self.attr = Type(...)
             let rhs = rest[1..^1].strip()
             var typeName = ""
             for c in rhs:
@@ -1461,36 +1633,59 @@ proc resolveAttributeType(text: string, className: string, attrName: string,
             if typeName.len > 0 and typeName[0] in {'A'..'Z'} and typeName notin wrapperTypes:
               return typeName
 
-    # Not found in class body — search base classes
-    for base in cls.bases:
-      var baseFound = false
-      for baseCls in classes:
-        if baseCls.name == base:
-          let baseResult = resolveAttributeType(text, base, attrName, imports, visited, depth + 1)
-          if baseResult.len > 0: return baseResult
-          baseFound = true
-          break
-      if not baseFound:
-        for imp in imports:
-          let target = if imp.alias.len > 0: imp.alias else: imp.name
-          if target == base and imp.name.len > 0:
-            let modulePath = resolveModulePath(imp.module)
-            if modulePath.len > 0:
-              let moduleText = readFile(modulePath)
-              let impResult = resolveAttributeType(moduleText, imp.name, attrName,
-                parseImports(moduleText, parentDir(modulePath)), visited, depth + 1)
-              if impResult.len > 0: return impResult
-    return ""
+    # @property method: @property followed by def attrName(...) -> Type:
+    if stripped == "@property" and i + 1 < workLines.len:
+      let nextStripped = workLines[i + 1].strip()
+      let defPattern = "def " & attrName
+      if nextStripped.startsWith(defPattern) and
+         nextStripped.len > defPattern.len and
+         nextStripped[defPattern.len] in {'(', ' ', '\t'}:
+        let arrowIdx = nextStripped.find("->")
+        if arrowIdx >= 0:
+          let retPart = nextStripped[arrowIdx + 2..^1].strip()
+          # Strip trailing ':'
+          let colonIdx = retPart.find(':')
+          let cleanRet = if colonIdx >= 0: retPart[0..<colonIdx].strip() else: retPart
+          var typeName = ""
+          for c in cleanRet:
+            if c in identChars: typeName.add(c)
+            else: break
+          if typeName.len > 0 and typeName notin wrapperTypes:
+            return typeName
 
-  # Class not found in current file — try imports
-  for imp in imports:
-    let target = if imp.alias.len > 0: imp.alias else: imp.name
-    if target == className and imp.name.len > 0:
-      let modulePath = resolveModulePath(imp.module)
-      if modulePath.len > 0:
-        let moduleText = readFile(modulePath)
-        return resolveAttributeType(moduleText, imp.name, attrName,
-          parseImports(moduleText, parentDir(modulePath)), visited, depth + 1)
+    # Class-level attribute: attrName: Type or attrName = Type(...)
+    if indent == cls.bodyIndent and stripped.startsWith(attrName):
+      let afterLen = attrName.len
+      if afterLen < stripped.len and stripped[afterLen] notin identChars:
+        let rest = stripped[afterLen..^1].strip()
+        if rest.len > 0 and rest[0] == ':':
+          let typeStr = rest[1..^1].strip()
+          let eqIdx = typeStr.find('=')
+          let cleanType = if eqIdx >= 0: typeStr[0..<eqIdx].strip() else: typeStr
+          var typeName = ""
+          for c in cleanType:
+            if c in identChars: typeName.add(c)
+            else: break
+          if typeName.len > 0 and typeName notin wrapperTypes:
+            return typeName
+        elif rest.len > 0 and rest[0] == '=' and not (rest.len > 1 and rest[1] == '='):
+          let rhs = rest[1..^1].strip()
+          var typeName = ""
+          for c in rhs:
+            if c in identChars: typeName.add(c)
+            else: break
+          if typeName.len > 0 and typeName[0] in {'A'..'Z'} and typeName notin wrapperTypes:
+            return typeName
+
+  # Not found in class body — search base classes
+  let workImports = if classPath.len > 0: getModuleImports(classPath) else: imports
+  for base in cls.bases:
+    let (baseFound, baseCi, basePath) = findClassInfo(workLines, base, known, workImports)
+    if not baseFound: continue
+    let bLines = if basePath.len > 0: getModuleLines(basePath) else: workLines
+    let bImports = if basePath.len > 0: getModuleImports(basePath) else: workImports
+    let baseResult = resolveAttributeType(bLines, baseCi.name, attrName, bImports, visited, known, depth + 1)
+    if baseResult.len > 0: return baseResult
   return ""
 
 proc joinParenContent(lines: seq[string], line, col: int): (string, int) =
@@ -1547,11 +1742,10 @@ proc joinParenContent(lines: seq[string], line, col: int): (string, int) =
     joined.add(lines[jl][trim..^1])
   return (joined, newCol)
 
-proc getDefinitionContext(text: string, line, col: int): (string, string) =
+proc getDefinitionContext(lines: seq[string], line, col: int): (string, string) =
   ## Returns (qualifier, name). E.g. "json.loads" → ("json", "loads")
   ## Walks full dot chain: "self.inner.method" → ("self.inner", "method")
   ## Treats content inside non-call parentheses as a single expression.
-  let lines = text.split('\n')
   if line >= lines.len: return ("", "")
   const identChars = {'a'..'z', 'A'..'Z', '0'..'9', '_'}
 
@@ -1671,8 +1865,9 @@ proc main() =
       let version = td["version"].getInt()
       var filePath = ""
       if uri.startsWith("file://"): filePath = uri[7..^1]
-      let knsyms = collectKnownSymbols(text, filePath)
-      documents[uri] = DocumentState(uri: uri, text: text, version: version, known: knsyms)
+      let docLines = text.split('\n')
+      let knsyms = collectKnownSymbols(docLines, filePath)
+      documents[uri] = DocumentState(uri: uri, text: text, version: version, known: knsyms, lines: docLines)
       if text.len < 1_000_000:
         publishDiagnostics(uri, text)
 
@@ -1688,7 +1883,13 @@ proc main() =
           documents[uri].version = version
           var filePath = ""
           if uri.startsWith("file://"): filePath = uri[7..^1]
-          documents[uri].known = collectKnownSymbols(newText, filePath)
+          documents[uri].lines = newText.split('\n')
+          documents[uri].known = collectKnownSymbols(documents[uri].lines, filePath)
+          if filePath.len > 0:
+            moduleLinesCache.del(filePath)
+            moduleClassCache.del(filePath)
+            moduleImportCache.del(filePath)
+            symbolCheckCache.del(filePath)
           if newText.len < 1_000_000:
             publishDiagnostics(uri, newText)
 
@@ -1721,19 +1922,19 @@ proc main() =
       let uri = params["textDocument"]["uri"].getStr()
       let defLine = params["position"]["line"].getInt()
       let defCol = params["position"]["character"].getInt()
-      let text = if uri in documents: documents[uri].text else: ""
+      let lines = if uri in documents: documents[uri].lines else: @[""]
       var filePath = ""
       if uri.startsWith("file://"):
         filePath = uri[7..^1]
       let known = if uri in documents: documents[uri].known else: default(KnownSymbols)
 
-      let (qualifier, name) = getDefinitionContext(text, defLine, defCol)
+      let (qualifier, name) = getDefinitionContext(lines, defLine, defCol)
 
       if name.len == 0:
         sendResponse(id, newJArray())
       elif qualifier.len == 0:
         # No qualifier — try same-file first, then imports
-        let (foundLine, foundCol) = findDefinitionInText(text, name)
+        let (foundLine, foundCol) = findDefinitionInText(lines, name)
         if foundLine >= 0:
           sendResponse(id, %*{
             "uri": uri,
@@ -1744,28 +1945,19 @@ proc main() =
           })
         else:
           var found = false
-          let packageDir = if filePath.len > 0: parentDir(filePath) else: ""
-          let imports = parseImports(text, packageDir)
-          for imp in imports:
-            let target = if imp.alias.len > 0: imp.alias else: imp.name
-            if target == name and imp.name.len > 0:
-              let modulePath = resolveModulePath(imp.module)
-              if modulePath.len > 0:
-                let moduleText = readFile(modulePath)
-                let (mLine, mCol) = findDefinitionInText(moduleText, imp.name)
-                if mLine >= 0:
-                  sendResponse(id, %*{
-                    "uri": "file://" & modulePath,
-                    "range": {
-                      "start": {"line": mLine, "character": mCol},
-                      "end": {"line": mLine, "character": mCol + imp.name.len}
-                    }
-                  })
-                  found = true
-                  break
+          let (kfp, kml, kmc) = findDefinitionViaKnown(name, known)
+          if kml >= 0:
+            sendResponse(id, %*{
+              "uri": "file://" & kfp,
+              "range": {
+                "start": {"line": kml, "character": kmc},
+                "end": {"line": kml, "character": kmc + name.len}
+              }
+            })
+            found = true
           if not found:
             # Try as module name: `import json` + gd on `json`
-            for imp in imports:
+            for imp in known.imports:
               if imp.name.len == 0:  # bare import
                 let target = if imp.alias.len > 0: imp.alias else: imp.module.split('.')[^1]
                 if target == name:
@@ -1785,8 +1977,7 @@ proc main() =
       else:
         # Qualifier present (e.g. json.loads, obj.method, ClassName(...).method)
         var found = false
-        let packageDir = if filePath.len > 0: parentDir(filePath) else: ""
-        let imports = parseImports(text, packageDir)
+        let imports = known.imports
 
         # Chained qualifier: self.x.y, cls.x.y, super.x.y, ClassName.x.y
         if qualifier.contains('.'):
@@ -1796,103 +1987,45 @@ proc main() =
           # Determine root classes to try
           var rootClasses: seq[string]
           if root == "super":
-            let enclosing = findEnclosingClass(text, defLine)
+            let enclosing = findEnclosingClass(lines, defLine)
             if enclosing.len > 0:
-              let classes = parseClasses(text)
-              for cls in classes:
-                if cls.name == enclosing:
-                  rootClasses = cls.bases
-                  break
+              let (cf, ci, _) = findClassInfo(lines, enclosing, known)
+              if cf: rootClasses = ci.bases
           elif root == "self" or root == "cls":
-            let enc = findEnclosingClass(text, defLine)
+            let enc = findEnclosingClass(lines, defLine)
             if enc.len > 0: rootClasses = @[enc]
           elif root.len > 0 and root[0] in {'A'..'Z'}:
             rootClasses = @[root]
           else:
-            let t = resolveQualifierType(text, root, defLine)
+            let t = resolveQualifierType(lines, root, defLine)
             if t.len > 0: rootClasses = @[t]
 
           for startClass in rootClasses:
             var currentClass = startClass
             var ok = true
-            var resolvedViaImport = false
             for i in 1..<chainParts.len:
-              resolvedViaImport = false
               var visited: HashSet[string]
               let nextClass = resolveAttributeType(
-                text, currentClass, chainParts[i], imports, visited)
+                lines, currentClass, chainParts[i], imports, visited, known)
               if nextClass.len == 0:
-                var foundImport = false
-                # Fast path: use cached module path from KnownSymbols
-                if currentClass in known.symbolModules:
-                  let modulePath = known.symbolModules[currentClass]
-                  if modulePath.len > 0:
-                    let moduleText = readFile(modulePath)
-                    var visited2: HashSet[string]
-                    let nc = resolveAttributeType(
-                      moduleText, currentClass, chainParts[i],
-                      parseImports(moduleText, parentDir(modulePath)), visited2)
-                    if nc.len > 0:
-                      currentClass = nc
-                      foundImport = true
-                      resolvedViaImport = true
-                if not foundImport:
-                  # Slow path: iterate imports
-                  for imp in imports:
-                    let target = if imp.alias.len > 0: imp.alias else: imp.name
-                    if target == currentClass and imp.name.len > 0:
-                      let modulePath = resolveModulePath(imp.module)
-                      if modulePath.len > 0:
-                        let moduleText = readFile(modulePath)
-                        var visited2: HashSet[string]
-                        let nc = resolveAttributeType(
-                          moduleText, imp.name, chainParts[i],
-                          parseImports(moduleText, parentDir(modulePath)), visited2)
-                        if nc.len > 0:
-                          currentClass = nc
-                          foundImport = true
-                          resolvedViaImport = true
-                          break
-                if not foundImport:
-                  ok = false
-                  break
-              else:
-                currentClass = nextClass
+                ok = false
+                break
+              currentClass = nextClass
 
             if ok and currentClass.len > 0:
-              if not resolvedViaImport:
-                # Class likely in current file — search here first
-                var visited: HashSet[string]
-                let (fp, ml, mc) = findMemberWithMRO(
-                  text, currentClass, name, imports, visited)
-                if ml >= 0:
-                  let resultUri = if fp.len > 0: "file://" & fp else: uri
-                  sendResponse(id, %*{
-                    "uri": resultUri,
-                    "range": {
-                      "start": {"line": ml, "character": mc},
-                      "end": {"line": ml, "character": mc + name.len}
-                    }
-                  })
-                  found = true
-              if not found and currentClass in known.symbolModules:
-                let modulePath = known.symbolModules[currentClass]
-                let moduleText = readFile(modulePath)
-                var visited2: HashSet[string]
-                let (fp2, ml2, mc2) = findMemberWithMRO(
-                  moduleText, currentClass, name,
-                  parseImports(moduleText, parentDir(modulePath)), visited2)
-                if ml2 >= 0:
-                  let resUri = if fp2.len > 0: "file://" & fp2
-                               else: "file://" & modulePath
-                  sendResponse(id, %*{
-                    "uri": resUri,
-                    "range": {
-                      "start": {"line": ml2, "character": mc2},
-                      "end": {"line": ml2, "character": mc2 + name.len}
-                    }
-                  })
-                  found = true
+              var visited: HashSet[string]
+              let (fp, ml, mc) = findMemberWithMRO(
+                lines, currentClass, name, imports, visited, known)
+              if ml >= 0:
+                let resultUri = if fp.len > 0: "file://" & fp else: uri
+                sendResponse(id, %*{
+                  "uri": resultUri,
+                  "range": {
+                    "start": {"line": ml, "character": mc},
+                    "end": {"line": ml, "character": mc + name.len}
+                  }
+                })
+                found = true
               # Transitive import lookup
               if not found:
                 var visitedPaths: HashSet[string]
@@ -1911,121 +2044,36 @@ proc main() =
 
         # super() → search base classes of enclosing class, skipping current
         if not found and qualifier == "super":
-          let enclosingClass = findEnclosingClass(text, defLine)
+          let enclosingClass = findEnclosingClass(lines, defLine)
           if enclosingClass.len > 0:
-            let classes = parseClasses(text)
-            for cls in classes:
-              if cls.name == enclosingClass:
-                for base in cls.bases:
-                  var visited: HashSet[string]
-                  let (fp, ml, mc) = findMemberWithMRO(
-                    text, base, name, imports, visited)
-                  if ml >= 0:
-                    if fp.len > 0:
-                      sendResponse(id, %*{
-                        "uri": "file://" & fp,
-                        "range": {
-                          "start": {"line": ml, "character": mc},
-                          "end": {"line": ml, "character": mc + name.len}
-                        }
-                      })
-                    else:
-                      sendResponse(id, %*{
-                        "uri": uri,
-                        "range": {
-                          "start": {"line": ml, "character": mc},
-                          "end": {"line": ml, "character": mc + name.len}
-                        }
-                      })
-                    found = true
-                    break
-                  # Base class might be imported
-                  for imp in imports:
-                    let target = if imp.alias.len > 0: imp.alias else: imp.name
-                    if target == base and imp.name.len > 0:
-                      let modulePath = resolveModulePath(imp.module)
-                      if modulePath.len > 0:
-                        let moduleText = readFile(modulePath)
-                        var visited2: HashSet[string]
-                        let (fp2, ml2, mc2) = findMemberWithMRO(
-                          moduleText, imp.name, name,
-                          parseImports(moduleText, parentDir(modulePath)), visited2)
-                        if ml2 >= 0:
-                          let resultUri = if fp2.len > 0: "file://" & fp2
-                                          else: "file://" & modulePath
-                          sendResponse(id, %*{
-                            "uri": resultUri,
-                            "range": {
-                              "start": {"line": ml2, "character": mc2},
-                              "end": {"line": ml2, "character": mc2 + name.len}
-                            }
-                          })
-                          found = true
-                          break
-                  if found: break
-                break
+            let (cf, ci, _) = findClassInfo(lines, enclosingClass, known)
+            if cf:
+              for base in ci.bases:
+                var visited: HashSet[string]
+                let (fp, ml, mc) = findMemberWithMRO(
+                  lines, base, name, imports, visited, known)
+                if ml >= 0:
+                  let resultUri = if fp.len > 0: "file://" & fp else: uri
+                  sendResponse(id, %*{
+                    "uri": resultUri,
+                    "range": {
+                      "start": {"line": ml, "character": mc},
+                      "end": {"line": ml, "character": mc + name.len}
+                    }
+                  })
+                  found = true
+                  break
 
-        # Try to resolve qualifier as a type and do MRO-based member search
-        let className = if not found: resolveQualifierType(text, qualifier, defLine)
-                        else: ""
-        if className.len > 0:
-          # Check if class is in current file
-          var visited: HashSet[string]
-          let (resultPath, mLine, mCol) = findMemberWithMRO(
-            text, className, name, imports, visited)
-          if mLine >= 0:
-            if resultPath.len > 0:
-              sendResponse(id, %*{
-                "uri": "file://" & resultPath,
-                "range": {
-                  "start": {"line": mLine, "character": mCol},
-                  "end": {"line": mLine, "character": mCol + name.len}
-                }
-              })
-            else:
-              sendResponse(id, %*{
-                "uri": uri,
-                "range": {
-                  "start": {"line": mLine, "character": mCol},
-                  "end": {"line": mLine, "character": mCol + name.len}
-                }
-              })
-            found = true
-          else:
-            # Class might be imported
-            for imp in imports:
-              let target = if imp.alias.len > 0: imp.alias else: imp.name
-              if target == className and imp.name.len > 0:
-                let modulePath = resolveModulePath(imp.module)
-                if modulePath.len > 0:
-                  let moduleText = readFile(modulePath)
-                  var visited2: HashSet[string]
-                  let (fp, ml, mc) = findMemberWithMRO(
-                    moduleText, imp.name, name, parseImports(moduleText, parentDir(modulePath)),
-                    visited2)
-                  if ml >= 0:
-                    let resultUri = if fp.len > 0: "file://" & fp
-                                    else: "file://" & modulePath
-                    sendResponse(id, %*{
-                      "uri": resultUri,
-                      "range": {
-                        "start": {"line": ml, "character": mc},
-                        "end": {"line": ml, "character": mc + name.len}
-                      }
-                    })
-                    found = true
-                    break
-
-        # Fallback: try as module.function (e.g. json.loads)
-        if not found:
+        # Try as module.function first (e.g. json.loads) — cheap check
+        if not found and qualifier != "self" and qualifier != "cls":
           for imp in imports:
             if imp.name.len == 0:  # `import X` or `import X as Y`
               let target = if imp.alias.len > 0: imp.alias else: imp.module.split('.')[^1]
               if target == qualifier:
                 let modulePath = resolveModulePath(imp.module)
                 if modulePath.len > 0:
-                  let moduleText = readFile(modulePath)
-                  let (mLine, mCol) = findDefinitionInText(moduleText, name)
+                  let moduleLines = getModuleLines(modulePath)
+                  let (mLine, mCol) = findDefinitionInText(moduleLines, name)
                   if mLine >= 0:
                     sendResponse(id, %*{
                       "uri": "file://" & modulePath,
@@ -2036,6 +2084,38 @@ proc main() =
                     })
                     found = true
                     break
+
+        # Try to resolve qualifier as a type and do MRO-based member search
+        let className = if not found: resolveQualifierType(lines, qualifier, defLine)
+                        else: ""
+        if className.len > 0:
+          var visited: HashSet[string]
+          let (resultPath, mLine, mCol) = findMemberWithMRO(
+            lines, className, name, imports, visited, known)
+          if mLine >= 0:
+            let resultUri = if resultPath.len > 0: "file://" & resultPath else: uri
+            sendResponse(id, %*{
+              "uri": resultUri,
+              "range": {
+                "start": {"line": mLine, "character": mCol},
+                "end": {"line": mLine, "character": mCol + name.len}
+              }
+            })
+            found = true
+          else:
+            # Transitive import lookup
+            var visitedPaths: HashSet[string]
+            let (tfp, tml, tmc) = findMemberTransitive(
+              className, name, imports, visitedPaths)
+            if tml >= 0:
+              sendResponse(id, %*{
+                "uri": "file://" & tfp,
+                "range": {
+                  "start": {"line": tml, "character": tmc},
+                  "end": {"line": tml, "character": tmc + name.len}
+                }
+              })
+              found = true
 
         if not found:
           sendResponse(id, newJArray())
