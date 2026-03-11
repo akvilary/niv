@@ -1,4 +1,5 @@
 ## Screen rendering pipeline
+## Each component renders into its own ScreenBuffer for isolated clipping
 
 import std/[strutils, os, unicode]
 import types
@@ -13,6 +14,7 @@ import highlight
 import git
 import unicode_width
 import path_manager
+import screenbuffer
 
 # Tokyo Night Storm palette
 const
@@ -33,26 +35,32 @@ const
   colComment  = 0x565f89
   colTeal     = 0x73daca
 
-proc renderSidebar(state: EditorState, editorRows: int) =
+# Persistent buffers (reused across renders to avoid allocation)
+var sidebarBuf: ScreenBuffer
+var editorBuf: ScreenBuffer
+var gitBuf: ScreenBuffer
+var statusBuf: ScreenBuffer
+
+proc renderSidebar(buf: var ScreenBuffer, state: EditorState, editorRows: int) =
   let sb = state.sidebar
   let w = sb.width
-  let visibleRows = editorRows
+  let hScroll = sb.horizontalScroll
 
   # Header
-  moveCursor(1, 1)
-  setColorBg(colDarkBg)
-  setColorFg(colFg)
-  let header = " FILE EXPLORER"
-  let truncHeader = if header.len > w: header[0..<w] else: header
-  stdout.write(truncHeader)
-  if truncHeader.len < w:
-    stdout.write(spaces(w - truncHeader.len))
-  setThemeColors()
+  buf.move(0, 0)
+  buf.setBg(colDarkBg)
+  buf.setFg(colFg)
+  buf.write(" FILE EXPLORER")
+  buf.clearToEol()
+  # Separator on header row
+  buf.move(0, w)
+  buf.resetColors()
+  buf.setFg(colGutter)
+  buf.write("\xe2\x94\x82")  # │
+  buf.resetFg()
 
   # Tree entries
-  let hScroll = sb.horizontalScroll
-  for row in 1..<visibleRows:
-    moveCursor(row + 1, 1)
+  for row in 1..<editorRows:
     let idx = sb.scrollOffset + row - 1
 
     if idx < sb.flatList.len:
@@ -63,64 +71,51 @@ proc renderSidebar(state: EditorState, editorRows: int) =
       else:
         "  "
       let suffix = if node.kind == fnkDirectory: "/" else: ""
-      let label = indent & icon & node.name & suffix
 
+      buf.resetColors()
       if idx == sb.cursorIndex and sb.focused:
-        setColorBg(colCursorLn)
+        buf.setBg(colCursorLn)
 
-      let startPos = min(hScroll, label.len)
-      let endPos = byteOffsetForWidth(label, startPos, w)
-      let prefixLen = indent.len + icon.len
-      let dotIdx = node.name.rfind('.')
-      let extStart = if dotIdx > 0: prefixLen + dotIdx else: label.len
-
-      var pos = startPos
+      # Write with left-edge clipping via negative column
+      buf.move(row, -hScroll)
 
       let inPath = isPathSaved(node.path)
       if inPath:
-        setColorFg(colCyan)
-        if pos < endPos:
-          stdout.write(label[pos..<endPos])
+        buf.setFg(colCyan)
+        buf.write(indent & icon & node.name & suffix)
       elif node.kind == fnkDirectory:
-        setColorFg(colBlue)
-        if pos < endPos:
-          stdout.write(label[pos..<endPos])
+        buf.setFg(colBlue)
+        buf.write(indent & icon & node.name & suffix)
       else:
-        # Prefix region
-        if pos < prefixLen and pos < endPos:
-          setColorFg(colFg)
-          let regionEnd = min(prefixLen, endPos)
-          stdout.write(label[pos..<regionEnd])
-          pos = regionEnd
-        # BaseName region
-        if pos < extStart and pos < endPos:
-          if dotIdx > 0:
-            setColorFg(colFg)
-          else:
-            setColorFg(colComment)
-          stdout.write(label[pos..<min(extStart, endPos)])
-          pos = min(extStart, endPos)
-        # Extension region
-        if dotIdx > 0 and pos < endPos:
-          setColorFg(colTeal)
-          stdout.write(label[pos..<endPos])
+        # Multi-color: prefix, basename, extension
+        buf.setFg(colFg)
+        buf.write(indent & icon)
+        let dotIdx = node.name.rfind('.')
+        if dotIdx > 0:
+          buf.setFg(colFg)
+          buf.write(node.name[0..<dotIdx])
+          buf.setFg(colTeal)
+          buf.write(node.name[dotIdx..^1])
+        else:
+          buf.setFg(colComment)
+          buf.write(node.name)
 
-      let displayCols = displayWidth(label, startPos, endPos)
-      if displayCols < w:
-        stdout.write(spaces(w - displayCols))
-
-      setThemeFg()
-      if idx == sb.cursorIndex and sb.focused:
-        setThemeColors()
+      # Fill rest of row (handles padding automatically)
+      if buf.curCol < 0:
+        buf.curCol = 0
+      buf.clearToEol()
+      buf.resetColors()
     else:
-      stdout.write(spaces(w))
+      buf.move(row, 0)
+      buf.resetColors()
+      buf.clearToEol()
 
-  # Vertical separator
-  for row in 1..visibleRows:
-    moveCursor(row, w + 1)
-    setColorFg(colGutter)
-    stdout.write("\xe2\x94\x82")  # │ (U+2502)
-    setThemeFg()
+    # Separator column
+    buf.move(row, w)
+    buf.setFg(colGutter)
+    buf.resetBg()
+    buf.write("\xe2\x94\x82")  # │
+    buf.resetFg()
 
 proc renderModalRow(startCol, innerWidth: int, line: string) =
   ## Render a single content row inside the modal: │ content │
@@ -205,80 +200,75 @@ proc renderLspManagerModal(totalWidth, height: int) =
         let statusLine = " " & mgr.statusMessage
         renderModalRow(startCol, innerWidth, statusLine)
 
-proc renderGitCommitEditor(state: EditorState, startRow, panelHeight, totalWidth: int) =
-  ## Render commit message editor in the git panel area
+proc renderGitCommitEditor(buf: var ScreenBuffer, state: EditorState, panelHeight: int) =
+  let totalWidth = buf.width
   let lnWidth = lineNumberWidth(state.buffer.lineCount)
   let textWidth = totalWidth - lnWidth
   let contentRows = panelHeight - 1  # -1 for help line
 
   # Separator with title
-  moveCursor(startRow, 1)
-  setColorFg(colGutter)
+  buf.move(0, 0)
+  buf.setFg(colGutter)
   let title = " Commit Message "
   let leftBorder = max(1, (totalWidth - title.len) div 2)
   let rightBorder = max(0, totalWidth - leftBorder - title.len)
-  stdout.write("\xe2\x94\x80".repeat(leftBorder))  # ─
-  setColorFg(colCyan)
-  stdout.write(title)
-  setColorFg(colGutter)
-  stdout.write("\xe2\x94\x80".repeat(rightBorder))  # ─
-  setThemeFg()
+  buf.write("\xe2\x94\x80".repeat(leftBorder))  # ─
+  buf.setFg(colCyan)
+  buf.write(title)
+  buf.setFg(colGutter)
+  buf.write("\xe2\x94\x80".repeat(rightBorder))  # ─
+  buf.resetFg()
 
   # Render buffer lines
   for row in 0..<contentRows:
-    moveCursor(startRow + 1 + row, 1)
-    setThemeColors()
-    clearLine()
+    buf.move(1 + row, 0)
+    buf.resetColors()
 
     let lineNum = state.viewport.topLine + row
     if lineNum < state.buffer.lineCount:
       let numStr = $(lineNum + 1)
       let padding = lnWidth - numStr.len - 1
-      setColorFg(colGutter)
-      stdout.write(spaces(padding) & numStr & " ")
-      setThemeFg()
+      buf.setFg(colGutter)
+      buf.write(spaces(padding) & numStr & " ")
+      buf.resetFg()
 
       let line = state.buffer.getLine(lineNum)
       let startCol = state.viewport.leftCol
       if startCol < line.len:
-        let endCol = byteOffsetForWidth(line, startCol, textWidth)
-        stdout.write(line[startCol..<endCol])
+        buf.write(line[startCol..^1])
     else:
-      setColorFg(colGutter)
-      stdout.write("~")
-      setThemeFg()
+      buf.setFg(colGutter)
+      buf.write("~")
+      buf.resetFg()
+    buf.clearToEol()
 
   # Help line
-  moveCursor(startRow + 1 + contentRows, 1)
-  setThemeColors()
-  clearLine()
+  buf.move(1 + contentRows, 0)
+  buf.resetColors()
   let modeHint = if state.mode == mInsert: "INSERT" else: "NORMAL"
   let helpLine = " " & modeHint & "  :wq commit  :q cancel"
-  setColorFg(colGutter)
-  let truncHelp = if helpLine.len > totalWidth: helpLine[0..<totalWidth] else: helpLine
-  stdout.write(truncHelp)
-  setThemeFg()
+  buf.setFg(colGutter)
+  buf.write(helpLine)
+  buf.clearToEol()
+  buf.resetFg()
 
-proc renderGitPanel(state: EditorState, startRow, panelHeight, totalWidth: int) =
+proc renderGitPanel(buf: var ScreenBuffer, state: EditorState, panelHeight: int) =
   let gp = state.gitPanel
-  let contentWidth = totalWidth
+  let contentWidth = buf.width
 
   if gp.inCommitInput:
-    renderGitCommitEditor(state, startRow, panelHeight, totalWidth)
+    renderGitCommitEditor(buf, state, panelHeight)
     return
 
   # Separator line
-  moveCursor(startRow, 1)
-  setColorFg(colGutter)
-  stdout.write("\xe2\x94\x80".repeat(contentWidth))  # ─
-  setThemeFg()
+  buf.move(0, 0)
+  buf.setFg(colGutter)
+  buf.write("\xe2\x94\x80".repeat(contentWidth))  # ─
+  buf.resetFg()
 
   case gp.view
   of gvFiles:
-    # Build display list: Staged section, then Changes section
     var displayLines: seq[tuple[text: string, isHeader: bool, fileIdx: int]] = @[]
-
-    # Count staged and unstaged
     var stagedFiles: seq[int] = @[]
     var unstagedFiles: seq[int] = @[]
     for i, f in gp.files:
@@ -302,18 +292,15 @@ proc renderGitPanel(state: EditorState, startRow, panelHeight, totalWidth: int) 
     if displayLines.len == 0:
       displayLines.add((" No changes", true, -1))
 
-    # Help line
     let helpLine = " s:stage/unstage  d:discard  c:commit  m:merge  b:branches  l:log  Enter:diff  r:refresh  q:close"
 
-    # Adjust scroll to keep cursor visible
-    # Map cursorIndex to display line index
     var cursorDisplayIdx = -1
     for i, dl in displayLines:
       if dl.fileIdx == gp.cursorIndex:
         cursorDisplayIdx = i
         break
 
-    let contentRows = panelHeight - 2  # minus separator and help line
+    let contentRows = panelHeight - 2
     var scrollOff = gp.scrollOffset
     if cursorDisplayIdx >= 0:
       if cursorDisplayIdx < scrollOff:
@@ -322,70 +309,49 @@ proc renderGitPanel(state: EditorState, startRow, panelHeight, totalWidth: int) 
         scrollOff = cursorDisplayIdx - contentRows + 1
 
     for row in 0..<panelHeight - 1:
-      moveCursor(startRow + 1 + row, 1)
-      setThemeColors()
-      clearLine()
+      buf.move(1 + row, 0)
+      buf.resetColors()
 
       if row < contentRows:
         let idx = scrollOff + row
         if idx < displayLines.len:
           let dl = displayLines[idx]
           if dl.isHeader:
-            setColorFg(colCyan)
-            let truncated = if dl.text.len > contentWidth: dl.text[0..<contentWidth] else: dl.text
-            stdout.write(truncated)
-            setThemeFg()
+            buf.setFg(colCyan)
+            buf.write(dl.text)
+            buf.resetFg()
           else:
             let isSelected = dl.fileIdx == gp.cursorIndex
             if isSelected:
-              setColorBg(colCursorLn)
+              buf.setBg(colCursorLn)
 
             let f = gp.files[dl.fileIdx]
-            # Color the status char
-            let prefix = "   "
             let statusCh = $f.statusChar
-            let rest = "  " & f.path
-            let fullLine = prefix & statusCh & rest
-            let truncated = if fullLine.len > contentWidth: fullLine[0..<contentWidth] else: fullLine
-
+            buf.write("   ")
             if f.isStaged:
-              stdout.write(prefix)
-              setColorFg(colGreen)
-              stdout.write(statusCh)
-              setThemeFg()
-              stdout.write(rest)
+              buf.setFg(colGreen)
             elif f.isUntracked:
-              stdout.write(prefix)
-              setColorFg(colYellow)
-              stdout.write(statusCh)
-              setThemeFg()
-              stdout.write(rest)
+              buf.setFg(colYellow)
             else:
-              stdout.write(prefix)
-              setColorFg(colRed)
-              stdout.write(statusCh)
-              setThemeFg()
-              stdout.write(rest)
+              buf.setFg(colRed)
+            buf.write(statusCh)
+            buf.resetFg()
+            buf.write("  " & f.path)
 
-            # Pad to fill line if selected
             if isSelected:
-              let written = truncated.len
-              if written < contentWidth:
-                stdout.write(spaces(contentWidth - written))
-              setThemeColors()
+              buf.clearToEol()
+              buf.resetColors()
       elif row == contentRows:
-        # Help line
-        setColorFg(colGutter)
-        let truncHelp = if helpLine.len > contentWidth: helpLine[0..<contentWidth] else: helpLine
-        stdout.write(truncHelp)
-        setThemeFg()
+        buf.setFg(colGutter)
+        buf.write(helpLine)
+        buf.resetFg()
+      buf.clearToEol()
 
   of gvDiff:
-    let contentRows = panelHeight - 2  # minus separator and help line
+    let contentRows = panelHeight - 2
     let helpLine = " q:back  j/k:scroll"
 
-    # Pre-compute line numbers for each diff line
-    var lineNums: seq[int] = @[]  # -1 means no number
+    var lineNums: seq[int] = @[]
     var oldLine, newLine = 0
     for line in gp.diffLines:
       if line.startsWith("@@"):
@@ -422,14 +388,12 @@ proc renderGitPanel(state: EditorState, startRow, panelHeight, totalWidth: int) 
         inc oldLine
         inc newLine
 
-    let lnW = 5  # width for line number column
-    let gutterW = lnW + 1  # "nnnnn│"
-    let textW = contentWidth - gutterW
+    let lnW = 5
+    let gutterW = lnW + 1
 
     for row in 0..<panelHeight - 1:
-      moveCursor(startRow + 1 + row, 1)
-      setThemeColors()
-      clearLine()
+      buf.move(1 + row, 0)
+      buf.resetColors()
 
       if row < contentRows:
         let lineIdx = gp.diffScrollOffset + row
@@ -437,48 +401,44 @@ proc renderGitPanel(state: EditorState, startRow, panelHeight, totalWidth: int) 
           let line = gp.diffLines[lineIdx]
           let num = if lineIdx < lineNums.len: lineNums[lineIdx] else: -1
 
-          # Draw line number gutter
-          setColorFg(colGutter)
+          buf.setFg(colGutter)
           if num > 0:
             let s = $num
-            stdout.write(spaces(lnW - s.len) & s)
+            buf.write(spaces(lnW - s.len) & s)
           else:
-            stdout.write(spaces(lnW))
-          stdout.write("\xe2\x94\x82")  # │
-          setThemeFg()
+            buf.write(spaces(lnW))
+          buf.write("\xe2\x94\x82")  # │
+          buf.resetFg()
 
-          # Draw diff content
-          let truncated = if line.len > textW: line[0..<textW] else: line
           if line.len > 0 and line[0] == '+' and not line.startsWith("+++"):
-            setColorFg(colGreen)
-            stdout.write(truncated)
-            setThemeFg()
+            buf.setFg(colGreen)
+            buf.write(line)
+            buf.resetFg()
           elif line.len > 0 and line[0] == '-' and not line.startsWith("---"):
-            setColorFg(colRed)
-            stdout.write(truncated)
-            setThemeFg()
+            buf.setFg(colRed)
+            buf.write(line)
+            buf.resetFg()
           elif line.startsWith("@@"):
-            setColorFg(colCyan)
-            stdout.write(truncated)
-            setThemeFg()
+            buf.setFg(colCyan)
+            buf.write(line)
+            buf.resetFg()
           elif line.startsWith("diff ") or line.startsWith("index ") or
                line.startsWith("---") or line.startsWith("+++"):
-            setColorFg(colGutter)
-            stdout.write(truncated)
-            setThemeFg()
+            buf.setFg(colGutter)
+            buf.write(line)
+            buf.resetFg()
           else:
-            stdout.write(truncated)
+            buf.write(line)
       elif row == contentRows:
-        setColorFg(colGutter)
-        let truncHelp = if helpLine.len > contentWidth: helpLine[0..<contentWidth] else: helpLine
-        stdout.write(truncHelp)
-        setThemeFg()
+        buf.setFg(colGutter)
+        buf.write(helpLine)
+        buf.resetFg()
+      buf.clearToEol()
 
   of gvLog:
-    let contentRows = panelHeight - 2  # minus separator and help line
+    let contentRows = panelHeight - 2
     let helpLine = " q:back  j/k:scroll"
 
-    # Adjust scroll to keep cursor visible
     var scrollOff = gp.logScrollOffset
     if gp.logCursorIndex < scrollOff:
       scrollOff = gp.logCursorIndex
@@ -486,14 +446,13 @@ proc renderGitPanel(state: EditorState, startRow, panelHeight, totalWidth: int) 
       scrollOff = gp.logCursorIndex - contentRows + 1
 
     for row in 0..<panelHeight - 1:
-      moveCursor(startRow + 1 + row, 1)
-      setThemeColors()
-      clearLine()
+      buf.move(1 + row, 0)
+      buf.resetColors()
 
       if row == 0 and scrollOff == 0:
-        setColorFg(colCyan)
-        stdout.write(" Recent commits:")
-        setThemeFg()
+        buf.setFg(colCyan)
+        buf.write(" Recent commits:")
+        buf.resetFg()
       elif row < contentRows:
         let adjustedRow = if scrollOff == 0: row - 1 else: row
         let idx = scrollOff + adjustedRow
@@ -502,30 +461,27 @@ proc renderGitPanel(state: EditorState, startRow, panelHeight, totalWidth: int) 
           let isSelected = idx == gp.logCursorIndex
 
           if isSelected:
-            setColorBg(colCursorLn)
+            buf.setBg(colCursorLn)
 
-          stdout.write("   ")
-          setColorFg(colYellow)
-          stdout.write(entry.hash)
-          setThemeFg()
-          stdout.write(" " & entry.message)
+          buf.write("   ")
+          buf.setFg(colYellow)
+          buf.write(entry.hash)
+          buf.resetFg()
+          buf.write(" " & entry.message)
 
           if isSelected:
-            let written = 3 + entry.hash.len + 1 + entry.message.len
-            if written < contentWidth:
-              stdout.write(spaces(contentWidth - written))
-            setThemeColors()
+            buf.clearToEol()
+            buf.resetColors()
       elif row == contentRows:
-        setColorFg(colGutter)
-        let truncHelp = if helpLine.len > contentWidth: helpLine[0..<contentWidth] else: helpLine
-        stdout.write(truncHelp)
-        setThemeFg()
+        buf.setFg(colGutter)
+        buf.write(helpLine)
+        buf.resetFg()
+      buf.clearToEol()
 
   of gvMergeConflicts:
     let contentRows = panelHeight - 2
     let helpLine = " o:ours  t:theirs  Enter:commit  q:abort"
 
-    # Adjust scroll
     var scrollOff = gp.conflictScrollOffset
     if gp.conflictCursorIndex < scrollOff:
       scrollOff = gp.conflictCursorIndex
@@ -533,14 +489,13 @@ proc renderGitPanel(state: EditorState, startRow, panelHeight, totalWidth: int) 
       scrollOff = gp.conflictCursorIndex - contentRows + 1
 
     for row in 0..<panelHeight - 1:
-      moveCursor(startRow + 1 + row, 1)
-      setThemeColors()
-      clearLine()
+      buf.move(1 + row, 0)
+      buf.resetColors()
 
       if row == 0 and scrollOff == 0:
-        setColorFg(colCyan)
-        stdout.write(" Merge Conflicts:")
-        setThemeFg()
+        buf.setFg(colCyan)
+        buf.write(" Merge Conflicts:")
+        buf.resetFg()
       elif row < contentRows:
         let adjustedRow = if scrollOff == 0: row - 1 else: row
         let idx = scrollOff + adjustedRow
@@ -549,59 +504,54 @@ proc renderGitPanel(state: EditorState, startRow, panelHeight, totalWidth: int) 
           let isSelected = idx == gp.conflictCursorIndex
 
           if isSelected:
-            setColorBg(colCursorLn)
+            buf.setBg(colCursorLn)
 
           if cf.conflictCount > 0:
-            setColorFg(colRed)
-            stdout.write("  C ")
+            buf.setFg(colRed)
+            buf.write("  C ")
           else:
-            setColorFg(colGreen)
-            stdout.write("  \xe2\x9c\x93 ")  # ✓
-          setThemeFg()
-          stdout.write(cf.path)
+            buf.setFg(colGreen)
+            buf.write("  \xe2\x9c\x93 ")  # ✓
+          buf.resetFg()
+          buf.write(cf.path)
           if cf.conflictCount > 0:
-            setColorFg(colGutter)
-            stdout.write(" (" & $cf.conflictCount & " conflicts)")
-            setThemeFg()
+            buf.setFg(colGutter)
+            buf.write(" (" & $cf.conflictCount & " conflicts)")
+            buf.resetFg()
 
           if isSelected:
-            let written = 4 + cf.path.len + (if cf.conflictCount > 0: 3 + ($cf.conflictCount).len + 11 else: 0)
-            if written < contentWidth:
-              stdout.write(spaces(contentWidth - written))
-            setThemeColors()
+            buf.clearToEol()
+            buf.resetColors()
       elif row == contentRows:
-        setColorFg(colGutter)
-        let truncHelp = if helpLine.len > contentWidth: helpLine[0..<contentWidth] else: helpLine
-        stdout.write(truncHelp)
-        setThemeFg()
+        buf.setFg(colGutter)
+        buf.write(helpLine)
+        buf.resetFg()
+      buf.clearToEol()
 
   of gvBranches:
-    let contentRows = panelHeight - 3  # separator, search line, help line
+    let contentRows = panelHeight - 3
     let helpLine = " Enter:checkout  Ctrl+f:fetch  Ctrl+l:pull  Ctrl+p:push  Esc:back  \xe2\x86\x91\xe2\x86\x93:navigate"
 
     # Search input line
-    moveCursor(startRow + 1, 1)
-    setThemeColors()
-    clearLine()
-    setColorFg(colCyan)
-    stdout.write(" Search: ")
-    setThemeFg()
-    stdout.write($gp.branchQuery)
-    stdout.write("\xe2\x96\x8e")  # ▎ cursor indicator
+    buf.move(1, 0)
+    buf.resetColors()
+    buf.setFg(colCyan)
+    buf.write(" Search: ")
+    buf.resetFg()
+    buf.write($gp.branchQuery)
+    buf.write("\xe2\x96\x8e")  # ▎ cursor indicator
+    buf.clearToEol()
 
-    # Adjust scroll to keep cursor visible
     var scrollOff = gp.branchScrollOffset
     if gp.branchCursorIndex < scrollOff:
       scrollOff = gp.branchCursorIndex
     elif gp.branchCursorIndex >= scrollOff + contentRows:
       scrollOff = gp.branchCursorIndex - contentRows + 1
 
-    # Branch list
     let currentBranch = gitCurrentBranch()
     for row in 0..<contentRows:
-      moveCursor(startRow + 2 + row, 1)
-      setThemeColors()
-      clearLine()
+      buf.move(2 + row, 0)
+      buf.resetColors()
 
       let idx = scrollOff + row
       if idx < gp.filteredBranches.len:
@@ -610,40 +560,38 @@ proc renderGitPanel(state: EditorState, startRow, panelHeight, totalWidth: int) 
         let isCurrent = branch == currentBranch
 
         if isSelected:
-          setColorBg(colCursorLn)
+          buf.setBg(colCursorLn)
 
         if isCurrent:
-          setColorFg(colGreen)
-          stdout.write(" * ")
+          buf.setFg(colGreen)
+          buf.write(" * ")
         else:
-          stdout.write("   ")
+          buf.write("   ")
 
-        stdout.write(branch)
+        buf.write(branch)
 
         if isSelected:
-          let written = 3 + branch.len
-          if written < contentWidth:
-            stdout.write(spaces(contentWidth - written))
-          setThemeColors()
+          buf.clearToEol()
+          buf.resetColors()
         if isCurrent:
-          setThemeFg()
+          buf.resetFg()
+      buf.clearToEol()
 
     # Help line
-    moveCursor(startRow + 2 + contentRows, 1)
-    setThemeColors()
-    clearLine()
-    setColorFg(colGutter)
-    let truncHelp = if helpLine.len > contentWidth: helpLine[0..<contentWidth] else: helpLine
-    stdout.write(truncHelp)
-    setThemeFg()
+    buf.move(2 + contentRows, 0)
+    buf.resetColors()
+    buf.setFg(colGutter)
+    buf.write(helpLine)
+    buf.clearToEol()
+    buf.resetFg()
 
-proc writeWithSearchBg(line: string, s, e: int,
+proc writeWithSearchBg(buf: var ScreenBuffer, line: string, s, e: int,
                        matchRanges: seq[tuple[startCol, endCol: int]]) =
   ## Write line[s..<e] with search highlight bg on matched ranges
   let lineLen = line.len
   if matchRanges.len == 0 or s >= e:
     if s < e and s < lineLen:
-      stdout.write(line[s..<min(e, lineLen)])
+      buf.write(line[s..<min(e, lineLen)])
     return
   var col = s
   for mr in matchRanges:
@@ -653,67 +601,37 @@ proc writeWithSearchBg(line: string, s, e: int,
     if col < mr.startCol:
       let gapEnd = min(mr.startCol, e)
       if col < gapEnd and col < lineLen:
-        stdout.write(line[col..<min(gapEnd, lineLen)])
+        buf.write(line[col..<min(gapEnd, lineLen)])
       col = gapEnd
     # Match with highlight
     let ms = max(mr.startCol, col)
     let me = min(mr.endCol, e)
     if ms < me and ms < lineLen:
-      setColorBg(colSearchBg)
-      stdout.write(line[ms..<min(me, lineLen)])
-      setColorBg(colBg)
+      buf.setBg(colSearchBg)
+      buf.write(line[ms..<min(me, lineLen)])
+      buf.setBg(colBg)
     col = max(col, me)
   # Trailing gap
   if col < e and col < lineLen:
-    stdout.write(line[col..<min(e, lineLen)])
+    buf.write(line[col..<min(e, lineLen)])
 
-proc render*(state: EditorState) =
-  let size = getTerminalSize()
-  let totalWidth = size.width
-  let height = size.height
-
-  let sidebarVisible = state.sidebar.visible
-  let colOffset = if sidebarVisible: state.sidebar.width + 1 else: 0
-  let editorWidth = totalWidth - colOffset
-
-  # Calculate git panel height
-  let gitPanelVisible = state.gitPanel.visible
-  let panelHeight = if gitPanelVisible: state.gitPanel.height else: 0
-  let editorRows = height - 2 - (if gitPanelVisible: panelHeight + 1 else: 0)  # +1 for separator
-  let inCommit = state.gitPanel.inCommitInput
-
-  # Choose which buffer to render in the editor area
-  let renderBuffer = if inCommit: state.gitPanel.savedBuffer else: state.buffer
-  let vpTopLine = state.viewport.topLine
-  let renderTopLine = if inCommit: state.gitPanel.savedTopLine
-  else: vpTopLine
-  let renderLeftCol = if inCommit: 0 else: state.viewport.leftCol
-
-  let lnWidth = lineNumberWidth(renderBuffer.lineCount)
-  let textWidth = editorWidth - lnWidth
+proc renderEditor(buf: var ScreenBuffer, state: EditorState,
+                  renderBuffer: Buffer, topLine, leftCol, lnWidth, textWidth,
+                  editorRows: int, inCommit: bool) =
   let useLspHighlight = semanticLines.len > 0 and not inCommit
 
-  hideCursor()
-  setThemeColors()
-
-  # Draw sidebar
-  if sidebarVisible and not inCommit:
-    renderSidebar(state, editorRows)
-    setThemeColors()
-
-  # Draw editor buffer (frozen when in commit mode)
   for row in 0..<editorRows:
-    moveCursor(row + 1, colOffset + 1)
-    clearLine()
+    buf.move(row, 0)
+    buf.resetColors()
 
-    let lineNum = renderTopLine + row
+    let lineNum = topLine + row
 
     if lineNum < renderBuffer.lineCount:
       let numStr = $(lineNum + 1)
       let padding = lnWidth - numStr.len - 1
 
       # Color line number by diagnostic severity
-      var diagSev = 0  # 0=none, 1=error, 2=warning
+      var diagSev = 0
       if not inCommit:
         for d in currentDiagnostics:
           if d.range.startLine == lineNum:
@@ -724,20 +642,20 @@ proc render*(state: EditorState) =
               diagSev = 2
 
       if diagSev == 1:
-        setColorFg(colError)
+        buf.setFg(colError)
       elif diagSev == 2:
-        setColorFg(colWarning)
+        buf.setFg(colWarning)
       else:
-        setColorFg(colGutter)
-      stdout.write(spaces(padding) & numStr & " ")
-      setThemeFg()
+        buf.setFg(colGutter)
+      buf.write(spaces(padding) & numStr & " ")
+      buf.resetFg()
 
       let line = renderBuffer.getLine(lineNum)
-      let startCol = renderLeftCol
+      let startCol = leftCol
       if startCol < line.len:
+        # Use endCol for performance (avoid iterating entire long lines)
         let endCol = byteOffsetForWidth(line, startCol, textWidth)
 
-        # Collect search match ranges for this line
         var lineMatchRanges: seq[tuple[startCol, endCol: int]]
         if state.searchQuery.len > 0 and state.searchMatches.len > 0 and not inCommit:
           for m in state.searchMatches:
@@ -745,7 +663,6 @@ proc render*(state: EditorState) =
               lineMatchRanges.add((m.col, m.col + state.searchQuery.len))
 
         if useLspHighlight and lineNum < semanticLines.len and semanticLines[lineNum].len > 0:
-          # LSP semantic tokens + search highlight
           let tokens = semanticLines[lineNum]
           var col = startCol
           for token in tokens:
@@ -755,39 +672,28 @@ proc render*(state: EditorState) =
             if col < token.col:
               let gapEnd = min(token.col, endCol)
               if col < gapEnd:
-                writeWithSearchBg(line, col, gapEnd, lineMatchRanges)
+                writeWithSearchBg(buf, line, col, gapEnd, lineMatchRanges)
               col = gapEnd
             let tStart = max(token.col, startCol)
             let tEndClamped = min(tEnd, endCol)
             if tStart < tEndClamped and tStart < line.len:
               let typeName = if token.tokenType < tokenLegend.len: tokenLegend[token.tokenType] else: ""
               let color = tokenColor(typeName)
-              if color != 0: setColorFg(color)
-              writeWithSearchBg(line, tStart, min(tEndClamped, line.len), lineMatchRanges)
-              if color != 0: setThemeFg()
+              if color != 0: buf.setFg(color)
+              writeWithSearchBg(buf, line, tStart, min(tEndClamped, line.len), lineMatchRanges)
+              if color != 0: buf.resetFg()
             col = max(col, tEndClamped)
           if col < endCol:
-            writeWithSearchBg(line, col, endCol, lineMatchRanges)
+            writeWithSearchBg(buf, line, col, endCol, lineMatchRanges)
         else:
-          writeWithSearchBg(line, startCol, endCol, lineMatchRanges)
+          writeWithSearchBg(buf, line, startCol, endCol, lineMatchRanges)
     else:
-      setColorFg(colGutter)
-      stdout.write("~")
-      setThemeFg()
+      buf.setFg(colGutter)
+      buf.write("~")
+      buf.resetFg()
+    buf.clearToEol()
 
-  # Draw git panel
-  if gitPanelVisible:
-    let panelStartRow = editorRows + 1
-    setThemeColors()
-    renderGitPanel(state, panelStartRow, panelHeight + 1, totalWidth)
-
-  # Status line
-  moveCursor(height - 1, 1)
-  resetAttributes()
-  setColorBg(colDarkBg)
-  setColorFg(colFg)
-  clearLine()
-
+proc renderStatusLine(buf: var ScreenBuffer, state: EditorState, totalWidth: int) =
   let modeStr = case state.mode
     of mNormal: " NORMAL "
     of mInsert: " INSERT "
@@ -795,6 +701,11 @@ proc render*(state: EditorState) =
     of mExplore: " EXPLORE "
     of mLspManager: " LSP "
     of mGit: " GIT "
+
+  # Status line (row 0)
+  buf.move(0, 0)
+  buf.setBg(colDarkBg)
+  buf.setFg(colFg)
 
   let filename = if state.buffer.filePath.len > 0:
     extractFilename(state.buffer.filePath)
@@ -813,7 +724,6 @@ proc render*(state: EditorState) =
     else: " LSP"
   let leftPart = modeStr & " " & filename & modFlag
 
-  # Diagnostic counts for status bar
   var errCount, warnCount = 0
   for d in currentDiagnostics:
     if d.severity == dsError: inc errCount
@@ -830,19 +740,19 @@ proc render*(state: EditorState) =
   let rightPart = lspIndicator & " " & state.buffer.encoding & " " & diagPart & positionPart & " "
 
   let gap = max(totalWidth - leftPart.len - rightPart.len, 0)
-  stdout.write(leftPart & spaces(gap) & rightPart)
+  buf.write(leftPart & spaces(gap) & rightPart)
+  buf.clearToEol()
 
-  # Command / message line
-  moveCursor(height, 1)
-  setThemeColors()
-  clearLine()
+  # Command / message line (row 1)
+  buf.move(1, 0)
+  buf.resetColors()
   if state.mode == mCommand:
     if state.searchInput:
-      stdout.write("/" & state.commandLine)
+      buf.write("/" & state.commandLine)
     else:
-      stdout.write(":" & state.commandLine)
+      buf.write(":" & state.commandLine)
   elif state.statusMessage.len > 0:
-    stdout.write(state.statusMessage)
+    buf.write(state.statusMessage)
   else:
     if state.gitBranch.len > 0:
       let gitLabel = " GIT "
@@ -850,26 +760,78 @@ proc render*(state: EditorState) =
       let branchLeft = gitLabel & spaces(pad) & state.gitBranch
       let diffRight = if state.gitDiffStat.len > 0: state.gitDiffStat & " " else: ""
       let cmdGap = max(totalWidth - branchLeft.len - diffRight.len, 0)
-      stdout.write(branchLeft & spaces(cmdGap) & diffRight)
+      buf.write(branchLeft & spaces(cmdGap) & diffRight)
+  buf.clearToEol()
 
-  # Modal overlays
+proc render*(state: EditorState) =
+  let size = getTerminalSize()
+  let totalWidth = size.width
+  let height = size.height
+
+  let sidebarVisible = state.sidebar.visible
+  let colOffset = if sidebarVisible: state.sidebar.width + 1 else: 0
+  let editorWidth = totalWidth - colOffset
+
+  let gitPanelVisible = state.gitPanel.visible
+  let panelHeight = if gitPanelVisible: state.gitPanel.height else: 0
+  let editorRows = height - 2 - (if gitPanelVisible: panelHeight + 1 else: 0)
+  let inCommit = state.gitPanel.inCommitInput
+
+  let renderBuffer = if inCommit: state.gitPanel.savedBuffer else: state.buffer
+  let vpTopLine = state.viewport.topLine
+  let renderTopLine = if inCommit: state.gitPanel.savedTopLine
+  else: vpTopLine
+  let renderLeftCol = if inCommit: 0 else: state.viewport.leftCol
+
+  let lnWidth = lineNumberWidth(renderBuffer.lineCount)
+  let textWidth = editorWidth - lnWidth
+
+  hideCursor()
+
+  # Resize and clear buffers
+  editorBuf.resize(editorWidth, editorRows)
+  statusBuf.resize(totalWidth, 2)
+
+  # Render editor
+  renderEditor(editorBuf, state, renderBuffer, renderTopLine, renderLeftCol,
+               lnWidth, textWidth, editorRows, inCommit)
+  editorBuf.blit(1, colOffset + 1)
+
+  # Render sidebar
+  if sidebarVisible and not inCommit:
+    sidebarBuf.resize(state.sidebar.width + 1, editorRows)  # +1 for separator
+    renderSidebar(sidebarBuf, state, editorRows)
+    sidebarBuf.blit(1, 1)
+
+  # Render git panel
+  if gitPanelVisible:
+    gitBuf.resize(totalWidth, panelHeight + 1)  # +1 for separator
+    renderGitPanel(gitBuf, state, panelHeight + 1)
+    gitBuf.blit(editorRows + 1, 1)
+
+  # Render status line + command line
+  renderStatusLine(statusBuf, state, totalWidth)
+  statusBuf.blit(height - 1, 1)
+
+  # Modal overlays (drawn directly to stdout, on top of buffers)
   if state.mode == mLspManager:
     setThemeColors()
     renderLspManagerModal(totalWidth, height)
     hideCursor()
     flushOut()
     return
-  # Completion popup overlay (drawn after main content)
+
+  # Completion popup overlay
   if completionState.active and completionState.items.len > 0 and state.mode == mInsert:
     let maxItems = min(10, completionState.items.len)
     let maxWidth = 40
-    let screenRow = state.cursor.line - vpTopLine + 2  # one row below cursor
+    let screenRow = state.cursor.line - vpTopLine + 2
     let screenCol = completionState.triggerCol - state.viewport.leftCol + lnWidth + colOffset + 1
 
     for i in 0..<maxItems:
       let popupRow = screenRow + i
       if popupRow >= height - 1:
-        break  # Don't draw over status line
+        break
       moveCursor(popupRow, screenCol)
 
       let item = completionState.items[i]
@@ -891,16 +853,14 @@ proc render*(state: EditorState) =
   if state.mode == mExplore or (state.mode == mGit and not inCommit):
     hideCursor()
   elif inCommit and state.mode != mCommand:
-    # Place cursor in the git panel commit editor area
     let commitLnWidth = lineNumberWidth(state.buffer.lineCount)
-    let panelStartRow = editorRows + 1  # separator row
+    let panelStartRow = editorRows + 1
     let screenRow = panelStartRow + 1 + (state.cursor.line - vpTopLine)
     let screenCol = state.cursor.col - state.viewport.leftCol + commitLnWidth + 1
     moveCursor(screenRow, screenCol)
     if state.mode == mInsert: setCursorBlinkingBar() else: setCursorBlock()
     showCursor()
   elif state.mode == mCommand:
-    # Command line cursor
     moveCursor(height, 1 + state.commandLine.len + 1)
     setCursorBlinkingBar()
     showCursor()
