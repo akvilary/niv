@@ -370,7 +370,10 @@ proc tokenizePython(text: string, startLine: int = 0, endLine: int = int.high;
           lastKeyword = word
         elif word == "import":
           tokens.add(PythonToken(kind: ptKeyword, line: sLine, col: sCol, length: length))
-          inImportLine = true
+          if inFromLine:
+            inFromLine = false
+          else:
+            inImportLine = true
           lastKeyword = ""
         elif word == "from":
           tokens.add(PythonToken(kind: ptKeyword, line: sLine, col: sCol, length: length))
