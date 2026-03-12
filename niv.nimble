@@ -1,5 +1,5 @@
 # Package
-version       = "0.5.33"
+version       = "0.5.34"
 author        = "akvilary"
 description   = "A Vim-like terminal text editor"
 license       = "MIT"
