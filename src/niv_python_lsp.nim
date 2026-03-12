@@ -1972,23 +1972,46 @@ proc getDefinitionContext(lines: seq[string], line, col: int): (string, string) 
     while beforeDot >= 0 and ln[beforeDot] in {' ', '\t'}: dec beforeDot  # skip space before dot
     if beforeDot < 0: break
     if ln[beforeDot] == ')':
-      # ClassName(...).x or super().x — match parens
+      # ClassName(...).x or super().x — match parens (may span lines)
       var depth = 1
       var qPos = beforeDot - 1
       while qPos >= 0 and depth > 0:
         if ln[qPos] == ')': inc depth
         elif ln[qPos] == '(': dec depth
         dec qPos
-      if depth != 0: break
-      var cEnd = qPos + 1
-      var cStart = cEnd
-      while cStart > 0 and ln[cStart - 1] in identChars:
-        dec cStart
-      let ident = ln[cStart..<cEnd]
-      if ident.len == 0: break
-      parts.add(ident)
-      pos = cStart - 1
-      while pos >= 0 and ln[pos] in {' ', '\t'}: dec pos
+      if depth == 0:
+        # Matched on same line
+        var cEnd = qPos + 1
+        var cStart = cEnd
+        while cStart > 0 and ln[cStart - 1] in identChars:
+          dec cStart
+        let ident = ln[cStart..<cEnd]
+        if ident.len == 0: break
+        parts.add(ident)
+        pos = cStart - 1
+        while pos >= 0 and ln[pos] in {' ', '\t'}: dec pos
+      else:
+        # Multiline: scan backward through original lines to find matching '('
+        var mDepth = depth
+        var foundIdent = ""
+        for sl in countdown(line - 1, max(0, line - 200)):
+          for si in countdown(lines[sl].len - 1, 0):
+            if lines[sl][si] == ')': inc mDepth
+            elif lines[sl][si] == '(':
+              dec mDepth
+              if mDepth == 0:
+                # Found matching '(' — extract identifier before it
+                var cEnd = si
+                var cStart = cEnd
+                while cStart > 0 and lines[sl][cStart - 1] in identChars:
+                  dec cStart
+                foundIdent = lines[sl][cStart..<cEnd]
+                break
+          if mDepth == 0: break
+        if foundIdent.len == 0: break
+        parts.add(foundIdent)
+        # No more chain to follow on ln, stop here
+        pos = -1
     elif ln[beforeDot] in identChars:
       var qEnd = beforeDot + 1
       var qStart = beforeDot
