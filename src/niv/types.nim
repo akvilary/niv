@@ -181,16 +181,28 @@ type
     col*: int         ## 0-indexed column
     lineText*: string ## the matching line content
 
+  FindDisplayKind* = enum
+    fdkDir, fdkFile, fdkMatch
+
+  FindDisplayItem* = object
+    kind*: FindDisplayKind
+    filePath*: string   ## dir path for fdkDir, file path for fdkFile/fdkMatch
+    name*: string       ## display name (dir name, file name)
+    matchIdx*: int      ## index into results (for fdkMatch)
+    expanded*: bool     ## for fdkDir/fdkFile: whether children are shown
+    matchCount*: int    ## for fdkDir: total matches, fdkFile: file matches
+    depth*: int         ## indent level: 0=dir, 1=file, 2=match
+
   FindState* = object
     query*: seq[Rune]
     results*: seq[FindMatch]
+    displayItems*: seq[FindDisplayItem]
     cursorIndex*: int
     scrollOffset*: int
     previewLines*: seq[string]
     previewStartLine*: int  ## file line number where preview starts
     searched*: bool         ## true after first search
     searchDir*: string      ## directory to search in ("" = cwd)
-    listHScroll*: int       ## horizontal scroll for file list
     caseSensitive*: bool    ## case-sensitive search
 
   EditorState* = object

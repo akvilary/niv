@@ -8,11 +8,165 @@ import lsp_types
 import highlight
 import fileio
 
+# ---------------------------------------------------------------------------
+# Tree structure for grouping results by directory hierarchy
+# ---------------------------------------------------------------------------
+
+type
+  FindFileNode = ref object
+    name*: string
+    path*: string
+    indices*: seq[int]
+    expanded*: bool
+
+  FindDirNode = ref object
+    name*: string                 # display name (collapsed chain)
+    subdirs*: seq[FindDirNode]
+    files*: seq[FindFileNode]
+    expanded*: bool
+
+var findTreeRoots: seq[FindDirNode]
+
+proc buildFindTree(results: seq[FindMatch]) =
+  type TmpNode = ref object
+    name: string
+    children: seq[TmpNode]
+    files: seq[FindFileNode]
+
+  var root = TmpNode(name: "")
+
+  for i in 0..<results.len:
+    let m = results[i]
+    let (dir, fileName) = splitPath(m.filePath)
+    let parts = if dir.len > 0: dir.split('/') else: @["."]
+
+    # Walk/create dir path in tree
+    var node = root
+    for part in parts:
+      var child: TmpNode = nil
+      for c in node.children:
+        if c.name == part:
+          child = c
+          break
+      if child == nil:
+        child = TmpNode(name: part)
+        node.children.add(child)
+      node = child
+
+    # Add match to file node
+    var foundFile = false
+    for f in node.files:
+      if f.path == m.filePath:
+        f.indices.add(i)
+        foundFile = true
+        break
+    if not foundFile:
+      node.files.add(FindFileNode(
+        name: fileName, path: m.filePath, indices: @[i], expanded: true,
+      ))
+
+  # Convert to FindDirNode, collapsing single-child chains
+  proc convert(tmp: TmpNode): FindDirNode =
+    var cur = tmp
+    var displayName = cur.name
+    while cur.children.len == 1 and cur.files.len == 0:
+      cur = cur.children[0]
+      displayName &= "/" & cur.name
+    result = FindDirNode(name: displayName, expanded: true)
+    for child in cur.children:
+      result.subdirs.add(convert(child))
+    result.files = cur.files
+
+  findTreeRoots = @[]
+  for child in root.children:
+    findTreeRoots.add(convert(child))
+
+proc countSubMatches(n: FindDirNode): int =
+  for f in n.files: result += f.indices.len
+  for s in n.subdirs: result += countSubMatches(s)
+
+proc flattenDir(items: var seq[FindDisplayItem], node: FindDirNode, depth: int) =
+  let totalMatches = countSubMatches(node)
+
+  items.add(FindDisplayItem(
+    kind: fdkDir, filePath: node.name, name: node.name,
+    expanded: node.expanded, depth: depth, matchCount: totalMatches,
+  ))
+  if not node.expanded: return
+
+  for child in node.subdirs:
+    flattenDir(items, child, depth + 1)
+
+  for f in node.files:
+    items.add(FindDisplayItem(
+      kind: fdkFile, filePath: f.path, name: f.name,
+      expanded: f.expanded, depth: depth + 1, matchCount: f.indices.len,
+    ))
+    if f.expanded:
+      for idx in f.indices:
+        items.add(FindDisplayItem(
+          kind: fdkMatch, filePath: f.path, matchIdx: idx, depth: depth + 2,
+        ))
+
+proc flattenFindTree(state: var EditorState) =
+  state.findState.displayItems = @[]
+  for root in findTreeRoots:
+    flattenDir(state.findState.displayItems, root, 0)
+
+proc buildDisplayItems(state: var EditorState) =
+  buildFindTree(state.findState.results)
+  flattenFindTree(state)
+
+proc toggleExpand(state: var EditorState) =
+  let items = state.findState.displayItems
+  if items.len == 0 or state.findState.cursorIndex >= items.len: return
+  let item = items[state.findState.cursorIndex]
+  if item.kind == fdkMatch: return
+
+  if item.kind == fdkDir:
+    proc toggleDir(nodes: seq[FindDirNode], name: string): bool =
+      for node in nodes:
+        if node.name == name:
+          node.expanded = not node.expanded
+          return true
+        if toggleDir(node.subdirs, name): return true
+      return false
+    discard toggleDir(findTreeRoots, item.name)
+
+  elif item.kind == fdkFile:
+    proc toggleFile(nodes: seq[FindDirNode], path: string): bool =
+      for node in nodes:
+        for f in node.files:
+          if f.path == path:
+            f.expanded = not f.expanded
+            return true
+        if toggleFile(node.subdirs, path): return true
+      return false
+    discard toggleFile(findTreeRoots, item.filePath)
+
+  flattenFindTree(state)
+
+# ---------------------------------------------------------------------------
+# Match helpers
+# ---------------------------------------------------------------------------
+
+proc currentMatch(state: EditorState): int =
+  let items = state.findState.displayItems
+  if items.len == 0 or state.findState.cursorIndex >= items.len: return -1
+  let item = items[state.findState.cursorIndex]
+  if item.kind == fdkMatch: return item.matchIdx
+  return -1
+
+# ---------------------------------------------------------------------------
+# Search
+# ---------------------------------------------------------------------------
+
 proc runFind(state: var EditorState) =
-  ## Run grep to find matches across files
   let query = $state.findState.query
   if query.len < 2:
     state.findState.results = @[]
+    state.findState.displayItems = @[]
+    findTreeRoots = @[]
     state.findState.searched = query.len > 0
     return
 
@@ -21,8 +175,6 @@ proc runFind(state: var EditorState) =
   state.findState.scrollOffset = 0
   state.findState.searched = true
 
-  # Use grep: -r recursive, -n line numbers, -I skip binary, -i case-insensitive
-  # --include common text file types to avoid noise
   let searchPath = if state.findState.searchDir.len > 0:
     quoteShell(state.findState.searchDir)
   else: "."
@@ -30,6 +182,8 @@ proc runFind(state: var EditorState) =
   let cmd = "grep -rnI" & caseFlag & " --color=never --exclude-dir=.git --exclude-dir=node_modules --exclude-dir=__pycache__ --exclude-dir=.venv -- " & quoteShell(query) & " " & searchPath & " 2>/dev/null"
   let (output, exitCode) = execCmdEx(cmd, options = {poUsePath})
   if exitCode != 0 and output.len == 0:
+    state.findState.displayItems = @[]
+    findTreeRoots = @[]
     return
 
   let maxResults = 5000
@@ -37,7 +191,6 @@ proc runFind(state: var EditorState) =
   for line in output.splitLines():
     if line.len == 0: continue
     if count >= maxResults: break
-    # Format: ./path/to/file:linenum:content
     let firstColon = line.find(':')
     if firstColon < 0: continue
     let secondColon = line.find(':', firstColon + 1)
@@ -58,8 +211,6 @@ proc runFind(state: var EditorState) =
     if not valid: continue
 
     let lineText = line[secondColon + 1..^1]
-
-    # Find column
     let col = if state.findState.caseSensitive:
       lineText.find(query)
     else:
@@ -67,29 +218,32 @@ proc runFind(state: var EditorState) =
 
     state.findState.results.add(FindMatch(
       filePath: filePath,
-      line: lineNum - 1,  # convert to 0-indexed
+      line: lineNum - 1,
       col: max(0, col),
       lineText: lineText,
     ))
     inc count
 
+  buildDisplayItems(state)
+
+# ---------------------------------------------------------------------------
+# Preview
+# ---------------------------------------------------------------------------
+
 proc loadPreview(state: var EditorState) =
-  ## Load preview lines for the currently selected match
   state.findState.previewLines = @[]
   state.findState.previewStartLine = 0
-  if state.findState.results.len == 0: return
-  if state.findState.cursorIndex >= state.findState.results.len: return
+  let mi = currentMatch(state)
+  if mi < 0: return
 
-  let match = state.findState.results[state.findState.cursorIndex]
+  let match = state.findState.results[mi]
   let fullPath = if match.filePath.isAbsolute: match.filePath
                  else: getCurrentDir() / match.filePath
-
   if not fileExists(fullPath): return
 
   try:
     let content = readFile(fullPath)
     let lines = content.splitLines()
-    # Show context around the match: 5 lines before, rest fills viewport
     let contextBefore = 5
     let startLine = max(0, match.line - contextBefore)
     state.findState.previewStartLine = startLine
@@ -98,15 +252,17 @@ proc loadPreview(state: var EditorState) =
   except IOError:
     discard
 
-proc openFindResult(state: var EditorState) =
-  ## Open the selected find result in the editor
-  if state.findState.results.len == 0: return
-  if state.findState.cursorIndex >= state.findState.results.len: return
+# ---------------------------------------------------------------------------
+# Open result
+# ---------------------------------------------------------------------------
 
-  let match = state.findState.results[state.findState.cursorIndex]
+proc openFindResult(state: var EditorState) =
+  let mi = currentMatch(state)
+  if mi < 0: return
+
+  let match = state.findState.results[mi]
   let fullPath = if match.filePath.isAbsolute: match.filePath
                  else: getCurrentDir() / match.filePath
-
   if not fileExists(fullPath): return
 
   stopFileLoader()
@@ -127,14 +283,23 @@ proc openFindResult(state: var EditorState) =
       sendSemanticTokensRange(0, min(state.buffer.lineCount - 1, 50))
       startBgHighlight(state.buffer.lineCount)
 
-proc adjustFindScroll(state: var EditorState, viewportHeight: int) =
-  ## Keep cursor visible in the results list
-  let contentRows = viewportHeight - 3
-  if contentRows <= 0: return
-  if state.findState.cursorIndex < state.findState.scrollOffset:
-    state.findState.scrollOffset = state.findState.cursorIndex
-  elif state.findState.cursorIndex >= state.findState.scrollOffset + contentRows:
-    state.findState.scrollOffset = state.findState.cursorIndex - contentRows + 1
+# ---------------------------------------------------------------------------
+# Navigation
+# ---------------------------------------------------------------------------
+
+proc moveCursorDown(state: var EditorState) =
+  if state.findState.cursorIndex < state.findState.displayItems.len - 1:
+    inc state.findState.cursorIndex
+    loadPreview(state)
+
+proc moveCursorUp(state: var EditorState) =
+  if state.findState.cursorIndex > 0:
+    dec state.findState.cursorIndex
+    loadPreview(state)
+
+# ---------------------------------------------------------------------------
+# Mode handler
+# ---------------------------------------------------------------------------
 
 proc handleFindMode*(state: var EditorState, key: InputKey) =
   case key.kind
@@ -143,55 +308,43 @@ proc handleFindMode*(state: var EditorState, key: InputKey) =
     state.statusMessage = ""
 
   of kkEnter:
-    if state.findState.results.len > 0:
-      openFindResult(state)
-    elif state.findState.query.len > 0:
+    if state.findState.displayItems.len > 0 and
+       state.findState.cursorIndex < state.findState.displayItems.len:
+      let item = state.findState.displayItems[state.findState.cursorIndex]
+      if item.kind in {fdkDir, fdkFile}:
+        toggleExpand(state)
+      else:
+        openFindResult(state)
+    elif state.findState.query.len > 0 and state.findState.results.len == 0:
       runFind(state)
-      if state.findState.results.len > 0:
+      if state.findState.displayItems.len > 0:
         loadPreview(state)
 
   of kkBackspace:
     if state.findState.query.len > 0:
       state.findState.query.setLen(state.findState.query.len - 1)
       runFind(state)
-      if state.findState.results.len > 0:
+      if state.findState.displayItems.len > 0:
         loadPreview(state)
 
   of kkChar:
     state.findState.query.add(key.ch)
     runFind(state)
-    if state.findState.results.len > 0:
+    if state.findState.displayItems.len > 0:
       loadPreview(state)
 
   of kkArrowDown:
-    if state.findState.results.len > 0:
-      state.findState.cursorIndex = min(state.findState.cursorIndex + 1,
-                                         state.findState.results.len - 1)
-      loadPreview(state)
+    moveCursorDown(state)
 
   of kkArrowUp:
-    if state.findState.cursorIndex > 0:
-      dec state.findState.cursorIndex
-      loadPreview(state)
-
-  of kkArrowLeft:
-    inc state.findState.listHScroll
-
-  of kkArrowRight:
-    if state.findState.listHScroll > 0:
-      dec state.findState.listHScroll
+    moveCursorUp(state)
 
   of kkCtrlKey:
     case key.ctrl
     of Rune(ord('n')):
-      if state.findState.results.len > 0:
-        state.findState.cursorIndex = min(state.findState.cursorIndex + 1,
-                                           state.findState.results.len - 1)
-        loadPreview(state)
+      moveCursorDown(state)
     of Rune(ord('p')):
-      if state.findState.cursorIndex > 0:
-        dec state.findState.cursorIndex
-        loadPreview(state)
+      moveCursorUp(state)
     of Rune(ord('f')):
       state.mode = mNormal
       state.statusMessage = ""
@@ -199,10 +352,9 @@ proc handleFindMode*(state: var EditorState, key: InputKey) =
       state.findState.caseSensitive = not state.findState.caseSensitive
       if state.findState.query.len >= 2:
         runFind(state)
-        if state.findState.results.len > 0:
+        if state.findState.displayItems.len > 0:
           loadPreview(state)
     of Rune(ord('d')):
-      # Toggle: search in current file's directory / whole project
       if state.findState.searchDir.len > 0:
         state.findState.searchDir = ""
       else:
@@ -213,20 +365,20 @@ proc handleFindMode*(state: var EditorState, key: InputKey) =
         state.findState.searchDir = relativePath(dir, getCurrentDir())
       if state.findState.query.len >= 2:
         runFind(state)
-        if state.findState.results.len > 0:
+        if state.findState.displayItems.len > 0:
           loadPreview(state)
     else:
       discard
 
   of kkPageDown:
-    if state.findState.results.len > 0:
+    if state.findState.displayItems.len > 0:
       state.findState.cursorIndex = min(state.findState.cursorIndex + 20,
-                                         state.findState.results.len - 1)
+                                         state.findState.displayItems.len - 1)
       loadPreview(state)
 
   of kkPageUp:
     state.findState.cursorIndex = max(0, state.findState.cursorIndex - 20)
-    if state.findState.results.len > 0:
+    if state.findState.displayItems.len > 0:
       loadPreview(state)
 
   else:

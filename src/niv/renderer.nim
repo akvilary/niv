@@ -764,7 +764,7 @@ proc renderFind(buf: var ScreenBuffer, state: EditorState, totalWidth, totalHeig
   let listWidth = min(totalWidth div 3, 60)
   let previewWidth = totalWidth - listWidth - 1
   let contentRows = totalHeight - 3  # search + separator + help
-  let helpLine = " Enter:open  \xe2\x86\x91\xe2\x86\x93:navigate  Ctrl+s:match case  Ctrl+d:dir scope  Esc:close"
+  let helpLine = " Enter:open/toggle  \xe2\x86\x91\xe2\x86\x93:navigate  Ctrl+s:match case  Ctrl+d:dir scope  Esc:close"
 
   var hint = ""
   if fs.caseSensitive: hint.add("Aa")
@@ -785,34 +785,60 @@ proc renderFind(buf: var ScreenBuffer, state: EditorState, totalWidth, totalHeig
 
   let queryMatch = if fs.caseSensitive: queryStr else: queryStr.toLower()
 
+  # Get current match index for preview highlight
+  var curMatchIdx = -1
+  if fs.displayItems.len > 0 and fs.cursorIndex < fs.displayItems.len:
+    let curItem = fs.displayItems[fs.cursorIndex]
+    if curItem.kind == fdkMatch:
+      curMatchIdx = curItem.matchIdx
+
   for row in 0..<contentRows:
     let idx = scrollOff + row
 
-    # Left pane: results list
+    # Left pane: tree
     buf.move(1 + row, 0)
     buf.resetColors()
 
-    if idx < fs.results.len:
-      let m = fs.results[idx]
+    if idx < fs.displayItems.len:
+      let item = fs.displayItems[idx]
       let isSelected = idx == fs.cursorIndex
 
       if isSelected:
         buf.setBg(colCursorLn)
 
-      let entry = " " & m.filePath & ":" & $(m.line + 1)
-      # Right-align: clip left side, hScroll shifts view
-      let overflow = max(0, entry.len - listWidth)
-      let shift = -(overflow - fs.listHScroll)
-      buf.move(1 + row, shift)
+      let indent = spaces(item.depth * 2)
+      let arrow = if item.kind in {fdkDir, fdkFile}:
+        (if item.expanded: "\xe2\x96\xbc " else: "\xe2\x96\xb6 ")  # ▼ / ▶
+      else: ""
 
-      buf.setFg(colBlue)
-      buf.write(" " & m.filePath)
-      buf.setFg(colGutter)
-      buf.write(":" & $(m.line + 1))
-      buf.resetFg()
+      if item.kind == fdkDir:
+        buf.write(indent)
+        buf.setFg(colGutter)
+        buf.write(arrow)
+        buf.setFg(colBlue)
+        buf.write(item.name)
+        buf.resetFg()
+      elif item.kind == fdkFile:
+        buf.write(indent)
+        buf.setFg(colGutter)
+        buf.write(arrow)
+        buf.setFg(colFg)
+        buf.write(item.name)
+        buf.resetFg()
+      else:
+        let m = fs.results[item.matchIdx]
+        buf.write(indent)
+        buf.setFg(colGutter)
+        buf.write("  " & $(m.line + 1) & ": ")
+        buf.resetFg()
+        let prefixLen = buf.curCol
+        let maxText = listWidth - prefixLen
+        let text = m.lineText.strip()
+        if text.len > maxText and maxText > 0:
+          buf.write(text[0..<maxText])
+        else:
+          buf.write(text)
 
-      if buf.curCol < 0:
-        buf.curCol = 0
       if isSelected:
         while buf.curCol < listWidth:
           buf.write(" ")
@@ -832,10 +858,9 @@ proc renderFind(buf: var ScreenBuffer, state: EditorState, totalWidth, totalHeig
     buf.move(1 + row, listWidth + 1)
     buf.resetColors()
 
-    if fs.previewLines.len > 0 and fs.results.len > 0 and row < fs.previewLines.len:
+    if fs.previewLines.len > 0 and curMatchIdx >= 0 and row < fs.previewLines.len:
       let fileLine = fs.previewStartLine + row
-      let isMatchLine = fs.cursorIndex < fs.results.len and
-                        fileLine == fs.results[fs.cursorIndex].line
+      let isMatchLine = fileLine == fs.results[curMatchIdx].line
 
       # Line number
       let lnStr = $(fileLine + 1)
