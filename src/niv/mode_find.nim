@@ -179,7 +179,7 @@ proc currentMatch(state: EditorState): int =
 # ---------------------------------------------------------------------------
 
 proc runFind(state: var EditorState) =
-  let query = $state.findState.query
+  let query = state.findState.search.text
   if query.len < 2:
     state.findState.results = @[]
     state.findState.displayItems = @[]
@@ -357,20 +357,27 @@ proc handleFindMode*(state: var EditorState, key: InputKey) =
         toggleExpand(state)
       else:
         openFindResult(state)
-    elif state.findState.query.len > 0 and state.findState.results.len == 0:
+    elif state.findState.search.query.len > 0 and state.findState.results.len == 0:
       runFind(state)
       if state.findState.displayItems.len > 0:
         loadPreview(state)
 
   of kkBackspace:
-    if state.findState.query.len > 0:
-      state.findState.query.setLen(state.findState.query.len - 1)
+    if state.findState.search.query.len > 0:
+      state.findState.search.backspace()
+      runFind(state)
+      if state.findState.displayItems.len > 0:
+        loadPreview(state)
+
+  of kkDelete:
+    if state.findState.search.cursor < state.findState.search.query.len:
+      state.findState.search.deleteChar()
       runFind(state)
       if state.findState.displayItems.len > 0:
         loadPreview(state)
 
   of kkChar:
-    state.findState.query.add(key.ch)
+    state.findState.search.addChar(key.ch)
     runFind(state)
     if state.findState.displayItems.len > 0:
       loadPreview(state)
@@ -380,6 +387,18 @@ proc handleFindMode*(state: var EditorState, key: InputKey) =
 
   of kkArrowUp:
     moveCursorUp(state)
+
+  of kkArrowLeft:
+    state.findState.search.moveLeft()
+
+  of kkArrowRight:
+    state.findState.search.moveRight()
+
+  of kkHome:
+    state.findState.search.moveHome()
+
+  of kkEnd:
+    state.findState.search.moveEnd()
 
   of kkCtrlKey:
     case key.ctrl
@@ -392,7 +411,7 @@ proc handleFindMode*(state: var EditorState, key: InputKey) =
       state.statusMessage = ""
     of Rune(ord('s')):
       state.findState.caseSensitive = not state.findState.caseSensitive
-      if state.findState.query.len >= 2:
+      if state.findState.search.query.len >= 2:
         runFind(state)
         if state.findState.displayItems.len > 0:
           loadPreview(state)
@@ -405,7 +424,7 @@ proc handleFindMode*(state: var EditorState, key: InputKey) =
         else:
           getCurrentDir()
         state.findState.searchDir = relativePath(dir, getCurrentDir())
-      if state.findState.query.len >= 2:
+      if state.findState.search.query.len >= 2:
         runFind(state)
         if state.findState.displayItems.len > 0:
           loadPreview(state)

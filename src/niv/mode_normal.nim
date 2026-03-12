@@ -57,14 +57,14 @@ proc handleNormalMode*(state: var EditorState, key: InputKey) =
     of Rune(ord('b')):
       if not state.gitPanel.visible:
         openGitPanel(state.gitPanel)
-      state.gitPanel.branchQuery = @[]
+      state.gitPanel.branchSearch.clear()
       filterBranches(state.gitPanel)
       state.gitPanel.branchDirectOpen = true
       state.gitPanel.view = gvBranches
       state.mode = mGit
       return
     of Rune(ord('f')):
-      state.findState.query = @[]
+      state.findState.search.clear()
       state.findState.results = @[]
       state.findState.cursorIndex = 0
       state.findState.scrollOffset = 0

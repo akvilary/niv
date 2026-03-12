@@ -531,7 +531,7 @@ proc renderGitPanel(buf: var ScreenBuffer, state: var EditorState, panelHeight: 
     let contentRows = panelHeight - 3
     let helpLine = " Enter:checkout  Ctrl+f:fetch  Ctrl+l:pull  Ctrl+p:push  Esc:back  \xe2\x86\x91\xe2\x86\x93:navigate"
 
-    buf.renderSearchInput(1, $gp.branchQuery, colCyan, colGutter)
+    buf.renderSearchInput(1, gp.branchSearch, colCyan, colGutter)
 
     var scrollOff = gp.branchScrollOffset
     if gp.branchCursorIndex < scrollOff:
@@ -758,7 +758,7 @@ proc renderStatusLine(buf: var ScreenBuffer, state: var EditorState, totalWidth:
 var findBuf: ScreenBuffer
 
 proc renderFind(buf: var ScreenBuffer, fs: var FindState, totalWidth, totalHeight: int) =
-  let queryStr = $fs.query
+  let queryStr = fs.search.text
   let listWidth = min(totalWidth div 3, 60)
   let previewWidth = totalWidth - listWidth - 1
   let contentRows = totalHeight - 3  # search + separator + help
@@ -772,7 +772,7 @@ proc renderFind(buf: var ScreenBuffer, fs: var FindState, totalWidth, totalHeigh
   if fs.results.len > 0:
     if hint.len > 0: hint.add("  ")
     hint.add($fs.results.len & " matches")
-  buf.renderSearchInput(0, queryStr, colCyan, colGutter, hint)
+  buf.renderSearchInput(0, fs.search, colCyan, colGutter, hint)
 
   # Adjust scroll to keep cursor visible
   var scrollOff = fs.scrollOffset

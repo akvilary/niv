@@ -4,6 +4,7 @@
 import std/unicode
 import terminal
 import unicode_width
+import types
 
 const
   defaultFg* = 0xc0caf5  # Tokyo Night Storm foreground
@@ -112,16 +113,23 @@ proc clearToEol*(buf: var ScreenBuffer) =
     buf.cells[idx] = Cell(ch: " ", fg: buf.curFg, bg: buf.curBg)
   buf.curCol = buf.width
 
-proc renderSearchInput*(buf: var ScreenBuffer, row: int, query: string,
+proc renderSearchInput*(buf: var ScreenBuffer, row: int, si: var SearchInput,
                          labelColor, hintColor: int, hint: string = "") =
-  ## Render a search input line: " Search: query▎" with hint at right edge
   buf.move(row, 0)
   buf.resetColors()
   buf.setFg(labelColor)
   buf.write(" Search: ")
   buf.resetFg()
-  buf.write(query)
-  buf.write("\xe2\x96\x8e")  # ▎ cursor indicator
+  let query = si.text
+  let cp = si.cursor
+  if cp < si.query.len:
+    let bytePos = runeOffset(query, cp)
+    buf.write(query[0..<bytePos])
+    buf.write("\xe2\x94\x82")  # │
+    buf.write(query[bytePos..^1])
+  else:
+    buf.write(query)
+    buf.write("\xe2\x94\x82")  # │
   buf.clearToEol()
   if hint.len > 0:
     let hintStr = hint & " "

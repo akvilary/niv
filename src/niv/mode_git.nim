@@ -17,14 +17,14 @@ proc loadMoreLog(panel: var GitPanelState) =
 
 proc loadMoreBranches(panel: var GitPanelState) =
   if not panel.branchHasMore: return
-  let more = gitBranches(batchSize, panel.branchLoadedCount, $panel.branchQuery)
+  let more = gitBranches(batchSize, panel.branchLoadedCount, panel.branchSearch.text)
   panel.filteredBranches.add(more)
   panel.branchLoadedCount += more.len
   if more.len < batchSize:
     panel.branchHasMore = false
 
 proc filterBranches*(panel: var GitPanelState) =
-  panel.filteredBranches = gitBranches(batchSize, query = $panel.branchQuery)
+  panel.filteredBranches = gitBranches(batchSize, query = panel.branchSearch.text)
   panel.branchLoadedCount = panel.filteredBranches.len
   panel.branchHasMore = panel.filteredBranches.len >= batchSize
   panel.branchCursorIndex = 0
@@ -173,7 +173,7 @@ proc handleFilesView(state: var EditorState, key: InputKey) =
     of Rune(ord('m')):
       enterMergeInput(state)
     of Rune(ord('b')):
-      state.gitPanel.branchQuery = @[]
+      state.gitPanel.branchSearch.clear()
       filterBranches(state.gitPanel)
       state.gitPanel.view = gvBranches
     of Rune(ord('r')):
@@ -295,12 +295,17 @@ proc handleBranchesView(state: var EditorState, key: InputKey) =
     closeBranchesView(state)
 
   of kkChar:
-    state.gitPanel.branchQuery.add(key.ch)
+    state.gitPanel.branchSearch.addChar(key.ch)
     filterBranches(state.gitPanel)
 
   of kkBackspace:
-    if state.gitPanel.branchQuery.len > 0:
-      state.gitPanel.branchQuery.setLen(state.gitPanel.branchQuery.len - 1)
+    if state.gitPanel.branchSearch.query.len > 0:
+      state.gitPanel.branchSearch.backspace()
+      filterBranches(state.gitPanel)
+
+  of kkDelete:
+    if state.gitPanel.branchSearch.cursor < state.gitPanel.branchSearch.query.len:
+      state.gitPanel.branchSearch.deleteChar()
       filterBranches(state.gitPanel)
 
   of kkEnter:
@@ -358,6 +363,15 @@ proc handleBranchesView(state: var EditorState, key: InputKey) =
   of kkArrowUp:
     if state.gitPanel.branchCursorIndex > 0:
       dec state.gitPanel.branchCursorIndex
+
+  of kkArrowLeft:
+    state.gitPanel.branchSearch.moveLeft()
+  of kkArrowRight:
+    state.gitPanel.branchSearch.moveRight()
+  of kkHome:
+    state.gitPanel.branchSearch.moveHome()
+  of kkEnd:
+    state.gitPanel.branchSearch.moveEnd()
 
   else:
     discard

@@ -158,7 +158,7 @@ type
     conflictScrollOffset*: int
     branches*: seq[string]         # all branches sorted by recency
     filteredBranches*: seq[string] # filtered by search query
-    branchQuery*: seq[Rune]        # search input
+    branchSearch*: SearchInput
     branchCursorIndex*: int
     branchDirectOpen*: bool        # opened via Ctrl+b from normal mode
     branchScrollOffset*: int
@@ -170,6 +170,10 @@ type
     savedCursor*: Position
     savedTopLine*: int
     confirmDiscard*: bool
+
+  SearchInput* = object
+    query*: seq[Rune]
+    cursor*: int               ## cursor position in runes
 
   SearchMatch* = object
     line*: int
@@ -194,7 +198,7 @@ type
     depth*: int         ## indent level: 0=dir, 1=file, 2=match
 
   FindState* = object
-    query*: seq[Rune]
+    search*: SearchInput
     results*: seq[FindMatch]
     displayItems*: seq[FindDisplayItem]
     cursorIndex*: int
@@ -225,6 +229,38 @@ type
     searchIndex*: int
     searchInput*: bool
     findState*: FindState
+
+proc addChar*(si: var SearchInput, ch: Rune) =
+  si.query.insert(ch, si.cursor)
+  inc si.cursor
+
+proc backspace*(si: var SearchInput) =
+  if si.cursor > 0:
+    si.query.delete(si.cursor - 1)
+    dec si.cursor
+
+proc deleteChar*(si: var SearchInput) =
+  if si.cursor < si.query.len:
+    si.query.delete(si.cursor)
+
+proc moveLeft*(si: var SearchInput) =
+  if si.cursor > 0: dec si.cursor
+
+proc moveRight*(si: var SearchInput) =
+  if si.cursor < si.query.len: inc si.cursor
+
+proc moveHome*(si: var SearchInput) =
+  si.cursor = 0
+
+proc moveEnd*(si: var SearchInput) =
+  si.cursor = si.query.len
+
+proc clear*(si: var SearchInput) =
+  si.query = @[]
+  si.cursor = 0
+
+proc text*(si: SearchInput): string =
+  $si.query
 
 proc noKey*(): InputKey =
   InputKey(kind: kkNone)
