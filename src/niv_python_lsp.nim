@@ -1099,6 +1099,34 @@ proc parseImports(lines: seq[string], packageDir: string = ""): seq[ImportInfo] 
         result.add(ImportInfo(module: module, name: "", alias: alias))
     inc i
 
+proc parseBases(rest: string, nameEnd: int, lines: seq[string], lineIdx: int): seq[string] =
+  ## Parse base classes from a class definition, handling multiline base lists.
+  ## `rest` is the part after "class ", nameEnd is the position after the class name.
+  if nameEnd >= rest.len or rest[nameEnd] != '(':
+    return @[]
+  var basesStr = ""
+  let closeIdx = rest.find(')', nameEnd)
+  if closeIdx > nameEnd + 1:
+    basesStr = rest[nameEnd + 1..<closeIdx]
+  elif closeIdx < 0:
+    # Multiline: collect from subsequent lines until ')'
+    basesStr = rest[nameEnd + 1..^1]
+    for j in lineIdx + 1..<lines.len:
+      let jln = lines[j].strip()
+      let ci = jln.find(')')
+      if ci >= 0:
+        if ci > 0:
+          basesStr.add(", " & jln[0..<ci])
+        break
+      if jln.len > 0:
+        basesStr.add(", " & jln)
+  for base in basesStr.split(','):
+    let b = base.strip()
+    let bracketIdx = b.find('[')
+    let baseName = if bracketIdx >= 0: b[0..<bracketIdx].strip() else: b
+    if baseName.len > 0:
+      result.add(baseName)
+
 proc parseClasses(lines: seq[string]): seq[ClassInfo] =
   ## Extract class definitions with their base classes
   for i in 0..<lines.len:
@@ -1117,19 +1145,7 @@ proc parseClasses(lines: seq[string]): seq[ClassInfo] =
         inc nameEnd
       if nameEnd == 0: continue
       let className = rest[0..<nameEnd]
-      var bases: seq[string]
-      # Parse bases if '(' follows
-      if nameEnd < rest.len and rest[nameEnd] == '(':
-        let closeIdx = rest.find(')', nameEnd)
-        if closeIdx > nameEnd + 1:
-          let basesStr = rest[nameEnd + 1..<closeIdx]
-          for base in basesStr.split(','):
-            let b = base.strip()
-            # Remove generic params like Base[T]
-            let bracketIdx = b.find('[')
-            let baseName = if bracketIdx >= 0: b[0..<bracketIdx].strip() else: b
-            if baseName.len > 0:
-              bases.add(baseName)
+      let bases = parseBases(rest, nameEnd, lines, i)
       # Determine body indent
       var bodyIndent = lineIndent + 4  # default
       if i + 1 < lines.len:
@@ -1164,17 +1180,7 @@ proc findClassInText(lines: seq[string], name: string): (bool, ClassInfo) =
       if nameEnd == 0: continue
       let className = rest[0..<nameEnd]
       if className != name: continue
-      var bases: seq[string]
-      if nameEnd < rest.len and rest[nameEnd] == '(':
-        let closeIdx = rest.find(')', nameEnd)
-        if closeIdx > nameEnd + 1:
-          let basesStr = rest[nameEnd + 1..<closeIdx]
-          for base in basesStr.split(','):
-            let b = base.strip()
-            let bracketIdx = b.find('[')
-            let baseName = if bracketIdx >= 0: b[0..<bracketIdx].strip() else: b
-            if baseName.len > 0:
-              bases.add(baseName)
+      let bases = parseBases(rest, nameEnd, lines, i)
       var bodyIndent = lineIndent + 4
       if i + 1 < lines.len:
         let nextLine = lines[i + 1]
@@ -1361,19 +1367,10 @@ proc collectKnownSymbols*(textLines: seq[string], filePath: string = ""): KnownS
       if nameEnd > 0:
         let className = rest[0..<nameEnd]
         result.types.incl(className)
-        var bases: seq[string]
-        if nameEnd < rest.len and rest[nameEnd] == '(':
-          let closeIdx = rest.find(')', nameEnd)
-          if closeIdx > nameEnd + 1:
-            let basesStr = rest[nameEnd + 1..<closeIdx]
-            for base in basesStr.split(','):
-              let b = base.strip()
-              let bracketIdx = b.find('[')
-              let baseName = if bracketIdx >= 0: b[0..<bracketIdx].strip() else: b
-              if baseName.len > 0:
-                bases.add(baseName)
-              if baseName in enumBaseSet:
-                result.enums.incl(className)
+        let bases = parseBases(rest, nameEnd, textLines, i)
+        for baseName in bases:
+          if baseName in enumBaseSet:
+            result.enums.incl(className)
         var lineIndent = 0
         for c in textLines[i]:
           if c == ' ': inc lineIndent
