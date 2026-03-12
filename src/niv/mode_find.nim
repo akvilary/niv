@@ -14,83 +14,99 @@ import fileio
 
 type
   FindFileNode = ref object
-    name*: string
-    path*: string
-    indices*: seq[int]
-    expanded*: bool
+    name: string
+    path: string
+    indices: seq[int]
+    expanded: bool
 
   FindDirNode = ref object
-    name*: string                 # display name (collapsed chain)
-    subdirs*: seq[FindDirNode]
-    files*: seq[FindFileNode]
-    expanded*: bool
+    name: string
+    subdirs: seq[FindDirNode]
+    files: seq[FindFileNode]
+    expanded: bool
+    matchCount: int              # cached total matches in subtree
 
 var findTreeRoots: seq[FindDirNode]
 
-proc buildFindTree(results: seq[FindMatch]) =
-  type TmpNode = ref object
-    name: string
-    children: seq[TmpNode]
-    files: seq[FindFileNode]
-
-  var root = TmpNode(name: "")
+proc buildFindTree(results: openArray[FindMatch]) =
+  var root = FindDirNode(name: "", expanded: true)
+  var lastFilePath: string
+  var lastFileNode: FindFileNode
+  var lastDir: string
+  var lastDirNode: FindDirNode
 
   for i in 0..<results.len:
-    let m = results[i]
-    let (dir, fileName) = splitPath(m.filePath)
-    let parts = if dir.len > 0: dir.split('/') else: @["."]
+    # Fast path: same file as previous (grep groups by file)
+    if results[i].filePath == lastFilePath:
+      lastFileNode.indices.add(i)
+      continue
 
-    # Walk/create dir path in tree
-    var node = root
-    for part in parts:
-      var child: TmpNode = nil
-      for c in node.children:
-        if c.name == part:
-          child = c
-          break
-      if child == nil:
-        child = TmpNode(name: part)
-        node.children.add(child)
-      node = child
+    # Split into dir + filename without allocating seq
+    let filePath = results[i].filePath
+    let slashPos = filePath.rfind('/')
+    var dir, fileName: string
+    if slashPos >= 0:
+      dir = filePath[0..<slashPos]
+      fileName = filePath[slashPos + 1..^1]
+    else:
+      dir = "."
+      fileName = filePath
 
-    # Add match to file node
-    var foundFile = false
+    # Walk to dir node (cached for consecutive same-dir results)
+    var dirNode: FindDirNode
+    if dir == lastDir and lastDirNode != nil:
+      dirNode = lastDirNode
+    else:
+      dirNode = root
+      var pos = 0
+      while pos < dir.len:
+        var nextSlash = pos
+        while nextSlash < dir.len and dir[nextSlash] != '/':
+          inc nextSlash
+        let part = dir[pos..<nextSlash]
+        var child: FindDirNode = nil
+        for c in dirNode.subdirs:
+          if c.name == part:
+            child = c
+            break
+        if child == nil:
+          child = FindDirNode(name: part, expanded: true)
+          dirNode.subdirs.add(child)
+        dirNode = child
+        pos = nextSlash + 1
+      lastDir = dir
+      lastDirNode = dirNode
+
+    let fileNode = FindFileNode(
+      name: fileName, path: filePath, indices: @[i], expanded: true,
+    )
+    dirNode.files.add(fileNode)
+    lastFilePath = filePath
+    lastFileNode = fileNode
+
+  # Collapse single-child chains in-place + compute matchCount bottom-up
+  proc collapseAndCount(node: FindDirNode) =
+    while node.subdirs.len == 1 and node.files.len == 0:
+      let child = node.subdirs[0]
+      node.name &= "/" & child.name
+      node.subdirs = child.subdirs
+      node.files = child.files
+    node.matchCount = 0
     for f in node.files:
-      if f.path == m.filePath:
-        f.indices.add(i)
-        foundFile = true
-        break
-    if not foundFile:
-      node.files.add(FindFileNode(
-        name: fileName, path: m.filePath, indices: @[i], expanded: true,
-      ))
-
-  # Convert to FindDirNode, collapsing single-child chains
-  proc convert(tmp: TmpNode): FindDirNode =
-    var cur = tmp
-    var displayName = cur.name
-    while cur.children.len == 1 and cur.files.len == 0:
-      cur = cur.children[0]
-      displayName &= "/" & cur.name
-    result = FindDirNode(name: displayName, expanded: true)
-    for child in cur.children:
-      result.subdirs.add(convert(child))
-    result.files = cur.files
+      node.matchCount += f.indices.len
+    for child in node.subdirs:
+      collapseAndCount(child)
+      node.matchCount += child.matchCount
 
   findTreeRoots = @[]
-  for child in root.children:
-    findTreeRoots.add(convert(child))
-
-proc countSubMatches(n: FindDirNode): int =
-  for f in n.files: result += f.indices.len
-  for s in n.subdirs: result += countSubMatches(s)
+  for child in root.subdirs:
+    collapseAndCount(child)
+    findTreeRoots.add(child)
 
 proc flattenDir(items: var seq[FindDisplayItem], node: FindDirNode, depth: int) =
-  let totalMatches = countSubMatches(node)
-
   items.add(FindDisplayItem(
-    kind: fdkDir, filePath: node.name, name: node.name,
-    expanded: node.expanded, depth: depth, matchCount: totalMatches,
+    kind: fdkDir, name: node.name,
+    expanded: node.expanded, depth: depth, matchCount: node.matchCount,
   ))
   if not node.expanded: return
 
@@ -105,13 +121,14 @@ proc flattenDir(items: var seq[FindDisplayItem], node: FindDirNode, depth: int) 
     if f.expanded:
       for idx in f.indices:
         items.add(FindDisplayItem(
-          kind: fdkMatch, filePath: f.path, matchIdx: idx, depth: depth + 2,
+          kind: fdkMatch, matchIdx: idx, depth: depth + 2,
         ))
 
 proc flattenFindTree(state: var EditorState) =
-  state.findState.displayItems = @[]
+  var items = newSeqOfCap[FindDisplayItem](state.findState.results.len * 2)
   for root in findTreeRoots:
-    flattenDir(state.findState.displayItems, root, 0)
+    flattenDir(items, root, 0)
+  state.findState.displayItems = move(items)
 
 proc buildDisplayItems(state: var EditorState) =
   buildFindTree(state.findState.results)
@@ -170,7 +187,6 @@ proc runFind(state: var EditorState) =
     state.findState.searched = query.len > 0
     return
 
-  state.findState.results = @[]
   state.findState.cursorIndex = 0
   state.findState.scrollOffset = 0
   state.findState.searched = true
@@ -182,48 +198,74 @@ proc runFind(state: var EditorState) =
   let cmd = "grep -rnI" & caseFlag & " --color=never --exclude-dir=.git --exclude-dir=node_modules --exclude-dir=__pycache__ --exclude-dir=.venv -- " & quoteShell(query) & " " & searchPath & " 2>/dev/null"
   let (output, exitCode) = execCmdEx(cmd, options = {poUsePath})
   if exitCode != 0 and output.len == 0:
+    state.findState.results = @[]
     state.findState.displayItems = @[]
     findTreeRoots = @[]
     return
 
   let maxResults = 5000
-  var count = 0
-  for line in output.splitLines():
-    if line.len == 0: continue
-    if count >= maxResults: break
-    let firstColon = line.find(':')
-    if firstColon < 0: continue
-    let secondColon = line.find(':', firstColon + 1)
-    if secondColon < 0: continue
+  let queryLower = if state.findState.caseSensitive: "" else: query.toLower()
+  var results = newSeqOfCap[FindMatch](min(maxResults, output.len div 40))
+  var pos = 0
+  while pos < output.len and results.len < maxResults:
+    var eol = pos
+    while eol < output.len and output[eol] != '\n':
+      inc eol
+    if eol == pos:
+      pos = eol + 1
+      continue
 
-    var filePath = line[0..<firstColon]
-    if filePath.startsWith("./"):
-      filePath = filePath[2..^1]
+    # Parse: filepath:linenum:content
+    var firstColon = -1
+    for i in pos..<eol:
+      if output[i] == ':':
+        firstColon = i
+        break
+    if firstColon < 0:
+      pos = eol + 1
+      continue
+
+    var secondColon = -1
+    for i in firstColon + 1..<eol:
+      if output[i] == ':':
+        secondColon = i
+        break
+    if secondColon < 0:
+      pos = eol + 1
+      continue
+
+    var fpStart = pos
+    if eol - pos > 2 and output[pos] == '.' and output[pos + 1] == '/':
+      fpStart = pos + 2
+    let filePath = output[fpStart..<firstColon]
 
     var lineNum = 0
     var valid = true
     for i in firstColon + 1..<secondColon:
-      if line[i] in {'0'..'9'}:
-        lineNum = lineNum * 10 + (ord(line[i]) - ord('0'))
+      if output[i] in {'0'..'9'}:
+        lineNum = lineNum * 10 + (ord(output[i]) - ord('0'))
       else:
         valid = false
         break
-    if not valid: continue
+    if not valid:
+      pos = eol + 1
+      continue
 
-    let lineText = line[secondColon + 1..^1]
+    let lineText = output[secondColon + 1..<eol]
     let col = if state.findState.caseSensitive:
       lineText.find(query)
     else:
-      lineText.toLower().find(query.toLower())
+      lineText.toLower().find(queryLower)
 
-    state.findState.results.add(FindMatch(
+    results.add(FindMatch(
       filePath: filePath,
       line: lineNum - 1,
       col: max(0, col),
       lineText: lineText,
     ))
-    inc count
+    pos = eol + 1
 
+  state.findState.results = move(results)
   buildDisplayItems(state)
 
 # ---------------------------------------------------------------------------

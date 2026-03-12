@@ -41,8 +41,7 @@ var editorBuf: ScreenBuffer
 var gitBuf: ScreenBuffer
 var statusBuf: ScreenBuffer
 
-proc renderSidebar(buf: var ScreenBuffer, state: EditorState, editorRows: int) =
-  let sb = state.sidebar
+proc renderSidebar(buf: var ScreenBuffer, sb: var SidebarState, editorRows: int) =
   let w = sb.width
   let hScroll = sb.horizontalScroll
 
@@ -200,7 +199,7 @@ proc renderLspManagerModal(totalWidth, height: int) =
         let statusLine = " " & mgr.statusMessage
         renderModalRow(startCol, innerWidth, statusLine)
 
-proc renderGitCommitEditor(buf: var ScreenBuffer, state: EditorState, panelHeight: int) =
+proc renderGitCommitEditor(buf: var ScreenBuffer, state: var EditorState, panelHeight: int) =
   let totalWidth = buf.width
   let lnWidth = lineNumberWidth(state.buffer.lineCount)
   let textWidth = totalWidth - lnWidth
@@ -252,8 +251,8 @@ proc renderGitCommitEditor(buf: var ScreenBuffer, state: EditorState, panelHeigh
   buf.clearToEol()
   buf.resetFg()
 
-proc renderGitPanel(buf: var ScreenBuffer, state: EditorState, panelHeight: int) =
-  let gp = state.gitPanel
+proc renderGitPanel(buf: var ScreenBuffer, state: var EditorState, panelHeight: int) =
+  template gp: untyped = state.gitPanel
   let contentWidth = buf.width
 
   if gp.inCommitInput:
@@ -607,8 +606,8 @@ proc writeWithSearchBg(buf: var ScreenBuffer, line: string, s, e: int,
   if col < e and col < lineLen:
     buf.write(line[col..<min(e, lineLen)])
 
-proc renderEditor(buf: var ScreenBuffer, state: EditorState,
-                  renderBuffer: Buffer, topLine, leftCol, lnWidth, textWidth,
+proc renderEditor(buf: var ScreenBuffer, state: var EditorState,
+                  renderBuffer: var Buffer, topLine, leftCol, lnWidth, textWidth,
                   editorRows: int, inCommit: bool) =
   let useLspHighlight = semanticLines.len > 0 and not inCommit
 
@@ -685,7 +684,7 @@ proc renderEditor(buf: var ScreenBuffer, state: EditorState,
       buf.resetFg()
     buf.clearToEol()
 
-proc renderStatusLine(buf: var ScreenBuffer, state: EditorState, totalWidth: int) =
+proc renderStatusLine(buf: var ScreenBuffer, state: var EditorState, totalWidth: int) =
   let modeStr = case state.mode
     of mNormal: " NORMAL "
     of mInsert: " INSERT "
@@ -758,8 +757,7 @@ proc renderStatusLine(buf: var ScreenBuffer, state: EditorState, totalWidth: int
 
 var findBuf: ScreenBuffer
 
-proc renderFind(buf: var ScreenBuffer, state: EditorState, totalWidth, totalHeight: int) =
-  let fs = state.findState
+proc renderFind(buf: var ScreenBuffer, fs: var FindState, totalWidth, totalHeight: int) =
   let queryStr = $fs.query
   let listWidth = min(totalWidth div 3, 60)
   let previewWidth = totalWidth - listWidth - 1
@@ -918,7 +916,7 @@ proc renderFind(buf: var ScreenBuffer, state: EditorState, totalWidth, totalHeig
   buf.clearToEol()
   buf.resetFg()
 
-proc render*(state: EditorState) =
+proc render*(state: var EditorState) =
   let size = getTerminalSize()
   let totalWidth = size.width
   let height = size.height
@@ -927,7 +925,7 @@ proc render*(state: EditorState) =
   if state.mode == mFind:
     hideCursor()
     findBuf.resize(totalWidth, height)
-    renderFind(findBuf, state, totalWidth, height)
+    renderFind(findBuf, state.findState, totalWidth, height)
     findBuf.blit(1, 1)
     hideCursor()
     flushOut()
@@ -942,7 +940,7 @@ proc render*(state: EditorState) =
   let editorRows = height - 2 - (if gitPanelVisible: panelHeight + 1 else: 0)
   let inCommit = state.gitPanel.inCommitInput
 
-  let renderBuffer = if inCommit: state.gitPanel.savedBuffer else: state.buffer
+  var renderBuffer = if inCommit: state.gitPanel.savedBuffer else: state.buffer
   let vpTopLine = state.viewport.topLine
   let renderTopLine = if inCommit: state.gitPanel.savedTopLine
   else: vpTopLine
@@ -965,7 +963,7 @@ proc render*(state: EditorState) =
   # Render sidebar
   if sidebarVisible and not inCommit:
     sidebarBuf.resize(state.sidebar.width + 1, editorRows)  # +1 for separator
-    renderSidebar(sidebarBuf, state, editorRows)
+    renderSidebar(sidebarBuf, state.sidebar, editorRows)
     sidebarBuf.blit(1, 1)
 
   # Render git panel
