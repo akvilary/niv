@@ -1099,12 +1099,13 @@ proc parseImports(lines: seq[string], packageDir: string = ""): seq[ImportInfo] 
         result.add(ImportInfo(module: module, name: "", alias: alias))
     inc i
 
-proc parseBases(rest: string, nameEnd: int, lines: seq[string], lineIdx: int): seq[string] =
+proc parseBases(rest: string, nameEnd: int, lines: seq[string], lineIdx: int): (seq[string], int) =
   ## Parse base classes from a class definition, handling multiline base lists.
-  ## `rest` is the part after "class ", nameEnd is the position after the class name.
+  ## Returns (bases, headerEndLine) where headerEndLine is the last line of the class header.
   if nameEnd >= rest.len or rest[nameEnd] != '(':
-    return @[]
+    return (@[], lineIdx)
   var basesStr = ""
+  var endLine = lineIdx
   let closeIdx = rest.find(')', nameEnd)
   if closeIdx > nameEnd + 1:
     basesStr = rest[nameEnd + 1..<closeIdx]
@@ -1115,52 +1116,20 @@ proc parseBases(rest: string, nameEnd: int, lines: seq[string], lineIdx: int): s
       let jln = lines[j].strip()
       let ci = jln.find(')')
       if ci >= 0:
+        endLine = j
         if ci > 0:
           basesStr.add(", " & jln[0..<ci])
         break
       if jln.len > 0:
         basesStr.add(", " & jln)
+  var bases: seq[string]
   for base in basesStr.split(','):
     let b = base.strip()
     let bracketIdx = b.find('[')
     let baseName = if bracketIdx >= 0: b[0..<bracketIdx].strip() else: b
     if baseName.len > 0:
-      result.add(baseName)
-
-proc parseClasses(lines: seq[string]): seq[ClassInfo] =
-  ## Extract class definitions with their base classes
-  for i in 0..<lines.len:
-    let ln = lines[i]
-    var lineIndent = 0
-    for c in ln:
-      if c == ' ': inc lineIndent
-      elif c == '\t': lineIndent += 4
-      else: break
-    let stripped = ln.strip()
-    if stripped.startsWith("class "):
-      var rest = stripped[6..^1]
-      # Extract class name
-      var nameEnd = 0
-      while nameEnd < rest.len and rest[nameEnd] in {'a'..'z', 'A'..'Z', '0'..'9', '_'}:
-        inc nameEnd
-      if nameEnd == 0: continue
-      let className = rest[0..<nameEnd]
-      let bases = parseBases(rest, nameEnd, lines, i)
-      # Determine body indent
-      var bodyIndent = lineIndent + 4  # default
-      if i + 1 < lines.len:
-        let nextLine = lines[i + 1]
-        var nextIndent = 0
-        for c in nextLine:
-          if c == ' ': inc nextIndent
-          elif c == '\t': nextIndent += 4
-          else: break
-        if nextIndent > lineIndent:
-          bodyIndent = nextIndent
-      result.add(ClassInfo(
-        name: className, bases: bases,
-        bodyStartLine: i + 1, bodyIndent: bodyIndent
-      ))
+      bases.add(baseName)
+  return (bases, endLine)
 
 proc findClassInText(lines: seq[string], name: string): (bool, ClassInfo) =
   ## Find a specific class by name in lines. Stops at first match.
@@ -1180,26 +1149,36 @@ proc findClassInText(lines: seq[string], name: string): (bool, ClassInfo) =
       if nameEnd == 0: continue
       let className = rest[0..<nameEnd]
       if className != name: continue
-      let bases = parseBases(rest, nameEnd, lines, i)
+      let (bases, headerEnd) = parseBases(rest, nameEnd, lines, i)
+      let bodyStart = headerEnd + 1
       var bodyIndent = lineIndent + 4
-      if i + 1 < lines.len:
-        let nextLine = lines[i + 1]
+      for j in bodyStart..<lines.len:
+        let bodyLine = lines[j]
         var nextIndent = 0
-        for c in nextLine:
+        var hasContent = false
+        for c in bodyLine:
           if c == ' ': inc nextIndent
           elif c == '\t': nextIndent += 4
-          else: break
-        if nextIndent > lineIndent:
+          else: hasContent = true; break
+        if hasContent and nextIndent > lineIndent:
           bodyIndent = nextIndent
+          break
       return (true, ClassInfo(
         name: className, bases: bases,
-        bodyStartLine: i + 1, bodyIndent: bodyIndent
+        bodyStartLine: bodyStart, bodyIndent: bodyIndent
       ))
   return (false, ClassInfo())
 
+const enumBaseSet = ["Enum", "IntEnum", "StrEnum", "Flag", "IntFlag"].toHashSet()
+
+type SymbolKind = enum
+  skClass, skEnum, skFunction, skUnknown
+
 var modulePathCache: Table[string, string]
 var moduleClassCache: Table[string, Table[string, ClassInfo]]
+var moduleFuncCache: Table[string, HashSet[string]]
 var moduleLinesCache: Table[string, seq[string]]
+var symbolCheckCache: Table[string, Table[string, SymbolKind]]
 
 proc getModuleLines(modulePath: string): seq[string] =
   ## Get lines of a module file, using cache. Reads and splits on first access.
@@ -1213,22 +1192,74 @@ proc getModuleLines(modulePath: string): seq[string] =
   result = moduleText.split('\n')
   moduleLinesCache[modulePath] = result
 
-proc getModuleClassInfo(modulePath: string, className: string): (bool, ClassInfo) =
-  ## Get ClassInfo from a module file, using cache. Parses all classes on first access.
-  if modulePath in moduleClassCache:
-    if className in moduleClassCache[modulePath]:
-      return (true, moduleClassCache[modulePath][className])
-    return (false, ClassInfo())
+proc ensureModuleParsed(modulePath: string) =
+  ## Single pass: populate both moduleClassCache and moduleFuncCache.
+  if modulePath in moduleClassCache: return
   let moduleLines = getModuleLines(modulePath)
   if moduleLines.len == 0 and not fileExists(modulePath):
-    return (false, ClassInfo())
+    moduleClassCache[modulePath] = initTable[string, ClassInfo]()
+    moduleFuncCache[modulePath] = initHashSet[string]()
+    return
   var classTable: Table[string, ClassInfo]
-  for ci in parseClasses(moduleLines):
-    classTable[ci.name] = ci
+  var funcSet: HashSet[string]
+  for i in 0..<moduleLines.len:
+    let ln = moduleLines[i]
+    var lineIndent = 0
+    for c in ln:
+      if c == ' ': inc lineIndent
+      elif c == '\t': lineIndent += 4
+      else: break
+    let stripped = ln.strip()
+    if stripped.startsWith("class "):
+      var rest = stripped[6..^1]
+      var nameEnd = 0
+      while nameEnd < rest.len and rest[nameEnd] in {'a'..'z', 'A'..'Z', '0'..'9', '_'}:
+        inc nameEnd
+      if nameEnd > 0:
+        let className = rest[0..<nameEnd]
+        let (bases, headerEnd) = parseBases(rest, nameEnd, moduleLines, i)
+        let bodyStart = headerEnd + 1
+        var bodyIndent = lineIndent + 4
+        for j in bodyStart..<moduleLines.len:
+          let bodyLine = moduleLines[j]
+          var nextIndent = 0
+          var hasContent = false
+          for c in bodyLine:
+            if c == ' ': inc nextIndent
+            elif c == '\t': nextIndent += 4
+            else: hasContent = true; break
+          if hasContent and nextIndent > lineIndent:
+            bodyIndent = nextIndent
+            break
+        classTable[className] = ClassInfo(
+          name: className, bases: bases,
+          bodyStartLine: bodyStart, bodyIndent: bodyIndent
+        )
+    elif ln.len > 4 and ln[0] == 'd' and ln[1] == 'e' and ln[2] == 'f' and ln[3] == ' ':
+      var nameEnd = 0
+      while 4 + nameEnd < ln.len and ln[4 + nameEnd] in {'a'..'z', 'A'..'Z', '0'..'9', '_'}:
+        inc nameEnd
+      if nameEnd > 0:
+        funcSet.incl(ln[4..<4 + nameEnd])
   moduleClassCache[modulePath] = classTable
-  if className in classTable:
-    return (true, classTable[className])
+  moduleFuncCache[modulePath] = funcSet
+
+proc getModuleClassInfo(modulePath: string, className: string): (bool, ClassInfo) =
+  ## Get ClassInfo from a module file. Triggers single-pass parse if needed.
+  ensureModuleParsed(modulePath)
+  if className in moduleClassCache[modulePath]:
+    return (true, moduleClassCache[modulePath][className])
   return (false, ClassInfo())
+
+proc getModuleSymbolKind(modulePath: string, name: string): SymbolKind =
+  ## Classify a symbol in a module as class/enum/function in a single lookup.
+  ensureModuleParsed(modulePath)
+  if name in moduleClassCache[modulePath]:
+    let ci = moduleClassCache[modulePath][name]
+    return if ci.bases.anyIt(it in enumBaseSet): skEnum else: skClass
+  if name in moduleFuncCache[modulePath]:
+    return skFunction
+  return skUnknown
 
 proc resolveModulePath(moduleName: string): string =
   if modulePathCache.hasKey(moduleName):
@@ -1289,56 +1320,68 @@ proc isPascalCase(s: string): bool =
     if s[i] in {'a'..'z'}: return true
   return false
 
-const enumBaseSet = ["Enum", "IntEnum", "StrEnum", "Flag", "IntFlag"].toHashSet()
-
-type SymbolKind = enum
-  skClass, skEnum, skFunction, skUnknown
-
-var symbolCheckCache: Table[string, Table[string, SymbolKind]]
-var moduleFuncCache: Table[string, HashSet[string]]
-
-proc getModuleFuncNames(modulePath: string): HashSet[string] =
-  ## Get set of top-level function names in a module. Cached after first access.
-  if modulePath in moduleFuncCache:
-    return moduleFuncCache[modulePath]
+proc findImportOfName(modulePath: string, name: string): string =
+  ## Find the module that re-exports `name` by scanning only for matching import lines.
+  ## Returns resolved file path or "" if not found. Avoids parsing all imports.
   let moduleLines = getModuleLines(modulePath)
-  for mln in moduleLines:
-    if mln.len > 4 and mln[0] == 'd' and mln[1] == 'e' and mln[2] == 'f' and mln[3] == ' ':
-      var nameEnd = 0
-      while 4 + nameEnd < mln.len and mln[4 + nameEnd] in {'a'..'z', 'A'..'Z', '0'..'9', '_'}:
-        inc nameEnd
-      if nameEnd > 0:
-        result.incl(mln[4..<4 + nameEnd])
-  moduleFuncCache[modulePath] = result
+  let packageDir = parentDir(modulePath)
+  let importPattern = " import "
+  for ln in moduleLines:
+    let stripped = ln.strip()
+    if stripped.startsWith("from ") and importPattern in stripped:
+      # Check if this import line contains the target name
+      let importIdx = stripped.find(importPattern)
+      let namesStr = stripped[importIdx + 8..^1]
+      # Quick check: does the names portion contain our target?
+      if name notin namesStr: continue
+      # Parse names to confirm exact match (not substring)
+      let cleanNames = namesStr.strip(chars = {'(', ')', ' ', '\t'})
+      var found = false
+      for part in cleanNames.split(','):
+        let trimmed = part.strip().split(" as ")[0].strip()
+        if trimmed == name:
+          found = true
+          break
+      if not found: continue
+      let module = stripped[5..<importIdx].strip()
+      if module.startsWith("."):
+        # Relative import
+        var dots = 0
+        while dots < module.len and module[dots] == '.': inc dots
+        var baseDir = packageDir
+        for _ in 1..<dots: baseDir = parentDir(baseDir)
+        let relName = module[dots..^1].strip()
+        if relName.len > 0:
+          let relPath = relName.replace(".", "/")
+          let asFile = baseDir / relPath & ".py"
+          if fileExists(asFile): return asFile
+          let asPackage = baseDir / relPath / "__init__.py"
+          if fileExists(asPackage): return asPackage
+      else:
+        return resolveModulePath(module)
+  return ""
 
 proc findSymbolInModule(modulePath: string, name: string, depth: int = 0): SymbolKind =
   ## Check if `name` is a class or function defined or re-exported in the module.
-  ## Follows import chains up to depth 5.
+  ## Follows only the specific name through import chains (not all imports).
   if depth > 5: return skUnknown
   if modulePath in symbolCheckCache and name in symbolCheckCache[modulePath]:
     return symbolCheckCache[modulePath][name]
   if modulePath notin symbolCheckCache:
     symbolCheckCache[modulePath] = initTable[string, SymbolKind]()
   symbolCheckCache[modulePath][name] = skUnknown  # prevent cycles
-  # Use moduleClassCache for class lookup
-  let (hasClass, ci) = getModuleClassInfo(modulePath, name)
-  if hasClass:
-    let kind = if ci.bases.anyIt(it in enumBaseSet): skEnum else: skClass
+  # Single lookup: class/enum/function from unified cache
+  let kind = getModuleSymbolKind(modulePath, name)
+  if kind != skUnknown:
     symbolCheckCache[modulePath][name] = kind
     return kind
-  # Function check — O(1) via cached function name set
-  if name in getModuleFuncNames(modulePath):
-    symbolCheckCache[modulePath][name] = skFunction
-    return skFunction
-  # Check imports in this module for re-exports (use cache)
-  for imp in getModuleImports(modulePath):
-    if imp.name == name:
-      let impPath = resolveModulePath(imp.module)
-      if impPath.len > 0:
-        let kind = findSymbolInModule(impPath, name, depth + 1)
-        if kind != skUnknown:
-          symbolCheckCache[modulePath][name] = kind
-          return kind
+  # Targeted re-export lookup: find only the import matching `name`
+  let reexportPath = findImportOfName(modulePath, name)
+  if reexportPath.len > 0:
+    let reKind = findSymbolInModule(reexportPath, name, depth + 1)
+    if reKind != skUnknown:
+      symbolCheckCache[modulePath][name] = reKind
+      return reKind
   return skUnknown
 
 proc collectKnownSymbols*(textLines: seq[string], filePath: string = ""): KnownSymbols =
@@ -1367,7 +1410,7 @@ proc collectKnownSymbols*(textLines: seq[string], filePath: string = ""): KnownS
       if nameEnd > 0:
         let className = rest[0..<nameEnd]
         result.types.incl(className)
-        let bases = parseBases(rest, nameEnd, textLines, i)
+        let (bases, headerEnd) = parseBases(rest, nameEnd, textLines, i)
         for baseName in bases:
           if baseName in enumBaseSet:
             result.enums.incl(className)
@@ -1376,19 +1419,22 @@ proc collectKnownSymbols*(textLines: seq[string], filePath: string = ""): KnownS
           if c == ' ': inc lineIndent
           elif c == '\t': lineIndent += 4
           else: break
+        let bodyStart = headerEnd + 1
         var bodyIndent = lineIndent + 4
-        if i + 1 < textLines.len:
-          let nextLine = textLines[i + 1]
+        for j in bodyStart..<textLines.len:
+          let bodyLine = textLines[j]
           var nextIndent = 0
-          for c in nextLine:
+          var hasContent = false
+          for c in bodyLine:
             if c == ' ': inc nextIndent
             elif c == '\t': nextIndent += 4
-            else: break
-          if nextIndent > lineIndent:
+            else: hasContent = true; break
+          if hasContent and nextIndent > lineIndent:
             bodyIndent = nextIndent
+            break
         result.localClasses[className] = ClassInfo(
           name: className, bases: bases,
-          bodyStartLine: i + 1, bodyIndent: bodyIndent
+          bodyStartLine: bodyStart, bodyIndent: bodyIndent
         )
     elif stripped.startsWith("def ") and textLines[i][0] == 'd':
       var rest = stripped[4..^1]
