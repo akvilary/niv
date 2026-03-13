@@ -86,9 +86,10 @@ proc handleNormalMode*(state: var EditorState, key: InputKey) =
     return
 
   # Block editing operations while file is loading — cursor movement always works
-  const loadingBlocked = {akInsertBefore, akInsertAfter, akInsertLineBelow,
-    akInsertLineAbove, akDeleteChar, akDeleteLine, akPaste, akPasteBefore,
-    akUndo, akRedo, akGotoDefinition}
+  const loadingBlocked = {akInsertBefore, akInsertAfter, akInsertAtLineStart,
+    akInsertAtLineEnd, akInsertLineBelow, akInsertLineAbove,
+    akDeleteChar, akDeleteLine,
+    akPaste, akPasteBefore, akUndo, akRedo, akGotoDefinition}
   if ir.action in loadingBlocked and not state.buffer.fullyLoaded:
     state.statusMessage = "File still loading..."
     return
@@ -130,11 +131,21 @@ proc handleNormalMode*(state: var EditorState, key: InputKey) =
   # Enter insert mode
   of akInsertBefore:
     state.mode = mInsert
+  of akInsertAtLineStart:
+    let line = state.buffer.getLine(state.cursor.line)
+    var col = 0
+    while col < line.len and line[col] in {' ', '\t'}:
+      inc col
+    state.cursor.col = col
+    state.mode = mInsert
   of akInsertAfter:
     if state.buffer.lineLen(state.cursor.line) > 0:
       let line = state.buffer.getLine(state.cursor.line)
       let rl = runeLenAt(line, state.cursor.col)
       state.cursor.col += rl
+    state.mode = mInsert
+  of akInsertAtLineEnd:
+    state.cursor = moveToLineEnd(state.buffer, state.cursor, mInsert)
     state.mode = mInsert
   of akInsertLineBelow:
     let lineNum = state.cursor.line

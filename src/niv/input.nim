@@ -10,7 +10,7 @@ type
     akMoveWordForward, akMoveWordBackward, akMoveWordEnd
     akMoveLineStart, akMoveLineEnd
     akMoveToTop, akMoveToBottom
-    akInsertBefore, akInsertAfter
+    akInsertBefore, akInsertAfter, akInsertAtLineStart, akInsertAtLineEnd
     akInsertLineBelow, akInsertLineAbove
     akDeleteChar, akDeleteLine
     akYankLine, akPaste, akPasteBefore
@@ -112,7 +112,9 @@ proc processNormalKey*(pending: var string, key: InputKey): InputResult =
   of "gg": pending = ""; return InputResult(complete: true, action: akMoveToTop)
   of "G": pending = ""; return InputResult(complete: true, action: akMoveToBottom)
   of "i": pending = ""; return InputResult(complete: true, action: akInsertBefore)
+  of "I": pending = ""; return InputResult(complete: true, action: akInsertAtLineStart)
   of "a": pending = ""; return InputResult(complete: true, action: akInsertAfter)
+  of "A": pending = ""; return InputResult(complete: true, action: akInsertAtLineEnd)
   of "o": pending = ""; return InputResult(complete: true, action: akInsertLineBelow)
   of "O": pending = ""; return InputResult(complete: true, action: akInsertLineAbove)
   of "x": pending = ""; return InputResult(complete: true, action: akDeleteChar)
