@@ -101,9 +101,9 @@ proc handleNormalMode*(state: var EditorState, key: InputKey) =
   of akMoveRight:
     state.cursor = moveRight(state.buffer, state.cursor, mNormal)
   of akMoveUp:
-    state.cursor = moveUp(state.buffer, state.cursor)
+    state.cursor = stickyMoveUp(state.buffer, state.cursor, state.desiredCol)
   of akMoveDown:
-    state.cursor = moveDown(state.buffer, state.cursor)
+    state.cursor = stickyMoveDown(state.buffer, state.cursor, state.desiredCol)
   of akMoveWordForward:
     state.cursor = moveWordForward(state.buffer, state.cursor)
   of akMoveWordBackward:
@@ -123,10 +123,10 @@ proc handleNormalMode*(state: var EditorState, key: InputKey) =
     state.cursor = Position(line: targetLine, col: 0)
   of akPageUp:
     for _ in 0..<state.viewport.height:
-      state.cursor = moveUp(state.buffer, state.cursor)
+      state.cursor = stickyMoveUp(state.buffer, state.cursor, state.desiredCol)
   of akPageDown:
     for _ in 0..<state.viewport.height:
-      state.cursor = moveDown(state.buffer, state.cursor)
+      state.cursor = stickyMoveDown(state.buffer, state.cursor, state.desiredCol)
 
   # Enter insert mode
   of akInsertBefore:
@@ -362,3 +362,7 @@ proc handleNormalMode*(state: var EditorState, key: InputKey) =
 
   of akNone:
     discard
+
+  # Update desiredCol for non-vertical actions
+  if ir.action notin {akMoveUp, akMoveDown, akPageUp, akPageDown}:
+    state.desiredCol = state.cursor.col

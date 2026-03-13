@@ -212,6 +212,7 @@ type
   EditorState* = object
     buffer*: Buffer
     cursor*: Position
+    desiredCol*: int         ## sticky column for vertical movement (j/k)
     viewport*: Viewport
     mode*: Mode
     commandLine*: string

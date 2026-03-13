@@ -122,6 +122,40 @@ proc moveDown*(buf: Buffer, pos: Position): Position =
       elif result.col > 0:
         result.col = snapToRuneStart(line, result.col)
 
+proc stickyMoveUp*(buf: Buffer, pos: Position, desiredCol: int): Position =
+  result = pos
+  if result.line > 0:
+    result.line -= 1
+    let lineL = buf.lineLen(result.line)
+    if lineL == 0:
+      result.col = 0
+    else:
+      let line = buf.getLine(result.line)
+      let maxCol = lastRuneStart(line)
+      if desiredCol > maxCol:
+        result.col = maxCol
+      elif desiredCol > 0:
+        result.col = snapToRuneStart(line, desiredCol)
+      else:
+        result.col = 0
+
+proc stickyMoveDown*(buf: Buffer, pos: Position, desiredCol: int): Position =
+  result = pos
+  if result.line < buf.lastLine:
+    result.line += 1
+    let lineL = buf.lineLen(result.line)
+    if lineL == 0:
+      result.col = 0
+    else:
+      let line = buf.getLine(result.line)
+      let maxCol = lastRuneStart(line)
+      if desiredCol > maxCol:
+        result.col = maxCol
+      elif desiredCol > 0:
+        result.col = snapToRuneStart(line, desiredCol)
+      else:
+        result.col = 0
+
 proc moveToLineStart*(pos: Position): Position =
   result = pos
   result.col = 0

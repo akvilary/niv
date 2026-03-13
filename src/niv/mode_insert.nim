@@ -66,6 +66,7 @@ proc handleInsertMode*(state: var EditorState, key: InputKey) =
     state.mode = mNormal
     # Clamp cursor (in Normal, cursor can't be past last char)
     state.cursor = clampCursor(state.buffer, state.cursor, mNormal)
+    state.desiredCol = state.cursor.col
     # Final LSP sync
     if lspIsActive() and state.buffer.filePath.len > 0:
       sendDidChange(state.buffer.data)
@@ -201,11 +202,11 @@ proc handleInsertMode*(state: var EditorState, key: InputKey) =
   of kkArrowUp:
     if completionState.active:
       closeCompletion()
-    state.cursor = moveUp(state.buffer, state.cursor)
+    state.cursor = stickyMoveUp(state.buffer, state.cursor, state.desiredCol)
   of kkArrowDown:
     if completionState.active:
       closeCompletion()
-    state.cursor = moveDown(state.buffer, state.cursor)
+    state.cursor = stickyMoveDown(state.buffer, state.cursor, state.desiredCol)
   of kkArrowLeft:
     if completionState.active:
       closeCompletion()
@@ -244,3 +245,7 @@ proc handleInsertMode*(state: var EditorState, key: InputKey) =
 
   else:
     discard
+
+  # Update desiredCol for non-vertical actions
+  if key.kind notin {kkArrowUp, kkArrowDown}:
+    state.desiredCol = state.cursor.col
