@@ -1,6 +1,6 @@
 ## Terminal I/O: raw mode, ANSI escape output, key reading
 
-import std/[posix, unicode]
+import std/[posix, unicode, base64]
 import posix/termios as ptermios
 import types
 
@@ -213,3 +213,8 @@ proc setCursorBlock*() =
 
 proc setCursorBlinkingBar*() =
   stdout.write("\e[5 q")
+
+proc copyToClipboard*(text: string) =
+  ## Copy text to system clipboard via OSC 52.
+  ## Works over SSH — the local terminal emulator handles the escape.
+  stdout.write("\e]52;c;" & encode(text) & "\a")

@@ -12,8 +12,8 @@ type
     akMoveToTop, akMoveToBottom
     akInsertBefore, akInsertAfter, akInsertAtLineStart, akInsertAtLineEnd
     akInsertLineBelow, akInsertLineAbove
-    akDeleteChar, akDeleteLine
-    akYankLine, akPaste, akPasteBefore
+    akDeleteChar, akDeleteLine, akDeleteToEnd, akDeleteToStart
+    akYankLine, akYankToEnd, akYankToStart, akPaste, akPasteBefore
     akUndo, akRedo
     akEnterCommand
     akPageUp, akPageDown
@@ -119,7 +119,13 @@ proc processNormalKey*(pending: var string, key: InputKey): InputResult =
   of "O": pending = ""; return InputResult(complete: true, action: akInsertLineAbove)
   of "x": pending = ""; return InputResult(complete: true, action: akDeleteChar)
   of "dd": pending = ""; return InputResult(complete: true, action: akDeleteLine)
+  of "D": pending = ""; return InputResult(complete: true, action: akDeleteToEnd)
+  of "d$": pending = ""; return InputResult(complete: true, action: akDeleteToEnd)
+  of "d0": pending = ""; return InputResult(complete: true, action: akDeleteToStart)
   of "yy": pending = ""; return InputResult(complete: true, action: akYankLine)
+  of "Y": pending = ""; return InputResult(complete: true, action: akYankToEnd)
+  of "y$": pending = ""; return InputResult(complete: true, action: akYankToEnd)
+  of "y0": pending = ""; return InputResult(complete: true, action: akYankToStart)
   of "p": pending = ""; return InputResult(complete: true, action: akPaste)
   of "P": pending = ""; return InputResult(complete: true, action: akPasteBefore)
   of "u": pending = ""; return InputResult(complete: true, action: akUndo)

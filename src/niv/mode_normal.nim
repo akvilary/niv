@@ -8,6 +8,7 @@ import input
 import undo
 import sidebar
 import lsp_types
+import terminal
 import lsp_client
 import lsp_protocol
 import highlight
@@ -88,7 +89,7 @@ proc handleNormalMode*(state: var EditorState, key: InputKey) =
   # Block editing operations while file is loading — cursor movement always works
   const loadingBlocked = {akInsertBefore, akInsertAfter, akInsertAtLineStart,
     akInsertAtLineEnd, akInsertLineBelow, akInsertLineAbove,
-    akDeleteChar, akDeleteLine,
+    akDeleteChar, akDeleteLine, akDeleteToEnd, akDeleteToStart,
     akPaste, akPasteBefore, akUndo, akRedo, akGotoDefinition}
   if ir.action in loadingBlocked and not state.buffer.fullyLoaded:
     state.statusMessage = "File still loading..."
@@ -212,6 +213,7 @@ proc handleNormalMode*(state: var EditorState, key: InputKey) =
     let lineText = state.buffer.getLine(lineNum)
     state.yankRegister = lineText
     state.yankIsLinewise = true
+    copyToClipboard(lineText)
     # Include the \n in deleted bytes
     let s = state.buffer.lineIndex[lineNum]
     let e = if lineNum + 1 < state.buffer.lineIndex.len:
@@ -235,7 +237,68 @@ proc handleNormalMode*(state: var EditorState, key: InputKey) =
     let lineText = state.buffer.getLine(state.cursor.line)
     state.yankRegister = lineText
     state.yankIsLinewise = true
+    copyToClipboard(lineText)
     state.statusMessage = "1 line yanked"
+
+  of akDeleteToEnd:
+    let lineText = state.buffer.getLine(state.cursor.line)
+    if state.cursor.col < lineText.len:
+      let deleted = lineText[state.cursor.col..^1]
+      state.yankRegister = deleted
+      state.yankIsLinewise = false
+      copyToClipboard(deleted)
+      let byteOff = state.buffer.byteOffsetOf(state.cursor)
+      let endOff = state.buffer.lineEndByte(state.cursor.line)
+      let deletedBytes = state.buffer.data[byteOff..<endOff]
+      state.buffer.undo.ensureTokensCaptured(state.cursor.line)
+      state.buffer.undo.pushUndo(UndoEntry(
+        op: uoDelete,
+        offset: byteOff,
+        text: deletedBytes,
+      ))
+      let newLine = lineText[0..<state.cursor.col]
+      state.buffer.replaceLine(state.cursor.line, newLine)
+      state.buffer.undo.commitGroup()
+      state.cursor = clampCursor(state.buffer, state.cursor, mNormal)
+
+  of akDeleteToStart:
+    if state.cursor.col > 0:
+      let lineText = state.buffer.getLine(state.cursor.line)
+      let deleted = lineText[0..<state.cursor.col]
+      state.yankRegister = deleted
+      state.yankIsLinewise = false
+      copyToClipboard(deleted)
+      let lineStart = state.buffer.lineIndex[state.cursor.line]
+      let byteOff = state.buffer.byteOffsetOf(state.cursor)
+      let deletedBytes = state.buffer.data[lineStart..<byteOff]
+      state.buffer.undo.ensureTokensCaptured(state.cursor.line)
+      state.buffer.undo.pushUndo(UndoEntry(
+        op: uoDelete,
+        offset: lineStart,
+        text: deletedBytes,
+      ))
+      let newLine = lineText[state.cursor.col..^1]
+      state.buffer.replaceLine(state.cursor.line, newLine)
+      state.buffer.undo.commitGroup()
+      state.cursor = Position(line: state.cursor.line, col: 0)
+
+  of akYankToEnd:
+    let lineText = state.buffer.getLine(state.cursor.line)
+    if state.cursor.col < lineText.len:
+      let yanked = lineText[state.cursor.col..^1]
+      state.yankRegister = yanked
+      state.yankIsLinewise = false
+      copyToClipboard(yanked)
+      state.statusMessage = "yanked to end of line"
+
+  of akYankToStart:
+    if state.cursor.col > 0:
+      let lineText = state.buffer.getLine(state.cursor.line)
+      let yanked = lineText[0..<state.cursor.col]
+      state.yankRegister = yanked
+      state.yankIsLinewise = false
+      copyToClipboard(yanked)
+      state.statusMessage = "yanked to start of line"
 
   of akPaste:
     if state.yankRegister.len > 0:
@@ -258,6 +321,25 @@ proc handleNormalMode*(state: var EditorState, key: InputKey) =
         state.buffer.undo.trackLineInserted()
         state.buffer.undo.commitGroup()
         state.cursor = Position(line: lineNum, col: 0)
+      else:
+        let lineText = state.buffer.getLine(state.cursor.line)
+        let insertCol = if lineText.len > 0:
+          min(state.cursor.col + runeLenAt(lineText, state.cursor.col), lineText.len)
+        else:
+          0
+        let insertOff = state.buffer.lineIndex[state.cursor.line] + insertCol
+        let text = state.yankRegister
+        state.buffer.undo.ensureTokensCaptured(state.cursor.line)
+        state.buffer.undo.pushUndo(UndoEntry(
+          op: uoInsert,
+          offset: insertOff,
+          text: text,
+        ))
+        let newLine = lineText[0..<insertCol] & text & lineText[insertCol..^1]
+        state.buffer.replaceLine(state.cursor.line, newLine)
+        state.buffer.undo.commitGroup()
+        state.cursor = Position(line: state.cursor.line, col: insertCol + text.len - 1)
+        state.cursor = clampCursor(state.buffer, state.cursor, mNormal)
 
   of akPasteBefore:
     if state.yankRegister.len > 0:
@@ -277,6 +359,22 @@ proc handleNormalMode*(state: var EditorState, key: InputKey) =
         state.buffer.undo.trackLineInserted()
         state.buffer.undo.commitGroup()
         state.cursor = Position(line: lineNum, col: 0)
+      else:
+        let insertOff = state.buffer.byteOffsetOf(state.cursor)
+        let text = state.yankRegister
+        let lineText = state.buffer.getLine(state.cursor.line)
+        let col = state.cursor.col
+        state.buffer.undo.ensureTokensCaptured(state.cursor.line)
+        state.buffer.undo.pushUndo(UndoEntry(
+          op: uoInsert,
+          offset: insertOff,
+          text: text,
+        ))
+        let newLine = lineText[0..<col] & text & lineText[col..^1]
+        state.buffer.replaceLine(state.cursor.line, newLine)
+        state.buffer.undo.commitGroup()
+        state.cursor = Position(line: state.cursor.line, col: col + text.len - 1)
+        state.cursor = clampCursor(state.buffer, state.cursor, mNormal)
 
   of akUndo:
     let res = state.buffer.undo.undo(state.buffer)
